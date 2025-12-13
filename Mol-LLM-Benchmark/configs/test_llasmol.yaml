@@ -1,0 +1,33 @@
+defaults:
+  - data: default
+  - trainer: llasmol_mistral_7b
+
+# General settings
+filename: llasmol_test
+seed: 42
+mode: test
+
+wandb_entity: jennyshin_gist_2024
+wandb_project: mol-llm-llasmol
+wandb_log_freq: 100
+wandb_id: null
+
+debug: true
+ckpt_path: null
+pretrained_ckpt_path: null
+
+# LLM 설정 (LLaSMol-Mistral-7B)
+llm_model: osunlp/LlaSMol-Mistral-7B
+
+# Benchmark mode - use pure LLM without multimodal components
+benchmark: true
+
+# Molecule representation - Text only (no graph)
+mol_representation: string_only
+num_query_token: 0  # Q-Former도 사용 안함
+
+shuffle_selfies: false
+shuffle_graph: false
+process_disjoint: true
+
+include_failed_as_zero: true

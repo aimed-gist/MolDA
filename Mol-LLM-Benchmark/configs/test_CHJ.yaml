@@ -1,0 +1,27 @@
+defaults:
+  - data: default
+  - gnn: gine_tokengt
+  - trainer: mistral7b_80gb
+
+# General settings
+filename: debugging
+seed: 42
+mode: test
+
+wandb_entity: jennyshin_gist_2024
+wandb_project: mol-llm
+wandb_log_freq: 100
+wandb_id: null
+
+debug: false
+ckpt_path: null
+pretrained_ckpt_path: null
+
+shuffle_selfies: false
+shuffle_graph: false
+process_disjoint: true
+
+# 평가 옵션: 실패 케이스를 0점으로 포함할지 여부
+# true: 실패 케이스에 0점 부여 (전체 평균에 포함)
+# false: 실패 케이스 제외 (성공한 것만 평균) - 원본 방식
+include_failed_as_zero: false

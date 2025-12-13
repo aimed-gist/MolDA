@@ -1,0 +1,55 @@
+# Logs
+*.log
+logs/
+checkpoint/logs/
+
+# Weights & Biases
+wandb/
+
+# Checkpoints
+checkpoint/
+*.ckpt
+*.pt
+*.pth
+*.bin
+
+# Hydra outputs
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.venv/
+venv/
+ENV/
+
+# Data cache
+*.cache
+.cache/
+*.arrow
+data/mol-llm_testset/
