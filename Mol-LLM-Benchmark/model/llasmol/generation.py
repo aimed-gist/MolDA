@@ -86,7 +86,7 @@ class LlaSMolGeneration(object):
         
         return sample
     
-    def _generate(self, input_ids, max_new_tokens=1024, **generation_settings):
+    def _generate(self, input_ids, attention_mask=None, max_new_tokens=1024, **generation_settings):
         generation_config = GenerationConfig(
             pad_token_id=self.model.config.pad_token_id,
             bos_token_id=self.model.config.bos_token_id,
@@ -94,15 +94,18 @@ class LlaSMolGeneration(object):
             **generation_settings,
         )
         self.model.eval()
-        # Ensure input_ids are on the same device as the model (get device dynamically for DDP)
+        # Move input_ids to the same device as the model
         device = next(self.model.parameters()).device
         input_ids = input_ids.to(device)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device)
         with torch.no_grad():
             generation_output = self.model.generate(
                 input_ids=input_ids,
+                attention_mask=attention_mask,
                 generation_config=generation_config,
                 return_dict_in_generate=True,
-                output_scores=False,  # Disabled for faster inference
+                output_scores=True,
                 max_new_tokens=max_new_tokens,
             )
         s = generation_output.sequences
@@ -147,14 +150,15 @@ class LlaSMolGeneration(object):
                 batch_samples.append(sample)
 
             if len(batch_samples) > 0:
-                input_ids = {'input_ids': [sample['input_ids'] for sample in batch_samples]}
-                input_ids = self.tokenizer.pad(
-                    input_ids,
+                batch_input = {'input_ids': [sample['input_ids'] for sample in batch_samples]}
+                batch_input = self.tokenizer.pad(
+                    batch_input,
                     padding=True,
                     return_tensors='pt'
                 )
-                input_ids = input_ids['input_ids'].to(self.device)
-                batch_output_text, _ = self._generate(input_ids, max_new_tokens=max_new_tokens, **generation_settings)
+                input_ids = batch_input['input_ids'].to(self.device)
+                attention_mask = batch_input['attention_mask'].to(self.device)
+                batch_output_text, _ = self._generate(input_ids, attention_mask=attention_mask, max_new_tokens=max_new_tokens, **generation_settings)
                 num_batch_samples = len(batch_samples)
                 ko = 0
                 num_return_sequences = 1 if 'num_return_sequences' not in generation_settings else generation_settings['num_return_sequences']
