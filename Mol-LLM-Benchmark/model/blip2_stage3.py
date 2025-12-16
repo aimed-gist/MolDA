@@ -5,7 +5,7 @@ from model.blip2_opt import Blip2OPT
 from model.blip2_llama import Blip2Llama
 from model.blip2_mistral import Blip2Mistral
 from model.blip2_t5 import Blip2T5
-from model.Benchmark_model import BenchmarkLLM
+from model.Benchmark_model import BenchmarkLLM, LlaSMolBenchmarkLLM
 import pytorch_lightning as pl
 from torch import optim
 from model.scheduler import LinearWarmupCosineLRScheduler, LinearWarmupStepLRScheduler
@@ -106,9 +106,16 @@ class Blip2Stage3(pl.LightningModule):
         is_benchmark_mode = getattr(args, 'benchmark', False)
 
         if is_benchmark_mode:
-            # Pure LLM benchmark mode - no multimodal components
-            print(f"[Blip2Stage3] Benchmark mode enabled - using BenchmarkLLM (pure LLM)")
-            blip2model = BenchmarkLLM
+            # Benchmark mode: galactica, llasmol, chemdfm 등 (text-only, no multimodal)
+            filename = (getattr(args, 'filename', '') or '').lower()
+
+            if 'llasmol' in filename:
+                print(f"[Blip2Stage3] Benchmark mode - LlaSMolBenchmarkLLM (filename: {filename})")
+                blip2model = LlaSMolBenchmarkLLM
+            else:
+                # galactica, chemdfm 등
+                print(f"[Blip2Stage3] Benchmark mode - BenchmarkLLM (filename: {filename})")
+                blip2model = BenchmarkLLM
         elif "galactica" in args.llm_model:
             blip2model = Blip2OPT
         elif "llama" in args.llm_model:
@@ -738,7 +745,7 @@ class Blip2Stage3(pl.LightningModule):
                             {f"parameters/{name}": val}, step=current_step
                         )
 
-    def evaluation_step(self, batch, batch_idx, dataloader_idx, mode="val"):        
+    def evaluation_step(self, batch, batch_idx, dataloader_idx, mode="val"):
         if "graph" in self.args.mol_representation:
             graphs = batch["graphs"]
             additional_graphs = batch["additional_graphs"]
@@ -747,6 +754,15 @@ class Blip2Stage3(pl.LightningModule):
             graphs = None
             additional_graphs = None
             is_mol_token = None
+
+        # Check if LlaSMol model (needs prompt_texts for official generation)
+        filename = (getattr(self.args, 'filename', '') or '').lower()
+        is_llasmol = 'llasmol' in filename
+
+        # Get prompt texts for LlaSMol (already formatted without [INST] wrapper)
+        prompt_texts = None
+        if is_llasmol and "prompt_text" in batch:
+            prompt_texts = batch["prompt_text"]
 
         gen_outputs = self.blip2model.generate(
             graphs=(graphs, additional_graphs),
@@ -757,6 +773,7 @@ class Blip2Stage3(pl.LightningModule):
             max_length=self.gen_max_len,
             min_length=self.min_len,
             output_attentions=self.args.log_attn_score,
+            prompt_texts=prompt_texts,
         )
         gen_logits = gen_outputs.logits
         gen_labels = batch.gen_labels
@@ -801,7 +818,7 @@ class Blip2Stage3(pl.LightningModule):
             prompt_input_ids = batch.prompt_input_ids
             input_ids = batch.input_ids
 
-        if self.args.log_attn_score:
+        if self.args.log_attn_score and attentions is not None:
             self.log_attn_score(
                 prompt_input_ids=prompt_input_ids,
                 mode=mode,

@@ -17,10 +17,15 @@ ckpt_path: null
 pretrained_ckpt_path: null
 
 # LLM 설정 (LLaSMol-Mistral-7B)
-llm_model: osunlp/LlaSMol-Mistral-7B
+# Base model + LoRA adapter
+llm_model: mistralai/Mistral-7B-v0.1
+peft_dir: osunlp/LlaSMol-Mistral-7B
 
 # Benchmark mode - use pure LLM without multimodal components
 benchmark: true
+
+# LoRA 모드로 설정 (adapter 로드)
+tune_llm: lora
 
 # Molecule representation - Text only (no graph)
 mol_representation: string_only

@@ -258,6 +258,114 @@ Description:""",
 }
 
 
+# ============================================
+# LlaSMol 스타일 프롬프트 템플릿 (SMolInstruct 원본 스타일)
+# Uses <SMILES>...</SMILES> tags for canonicalization
+# Reference: osunlp/SMolInstruct (https://huggingface.co/datasets/osunlp/SMolInstruct)
+# LlaSMol GitHub: https://github.com/OSU-NLP-Group/LLM4Chem
+#
+# SMolInstruct uses natural question format, NOT instruction format.
+# Response uses tags: <NUMBER>, <BOOLEAN>, <SMILES>, <MOLFORMULA>
+# ============================================
+LLASMOL_PROMPTS = {
+    # ============ Classification ============
+    # SMolInstruct style: natural question format
+    "bace": """Can <SMILES> {smiles} </SMILES> inhibit human β-secretase 1 (BACE-1)?""",
+
+    "smol-property_prediction-bbbp": """Is blood-brain barrier permeability (BBBP) a property of <SMILES> {smiles} </SMILES> ?""",
+
+    "smol-property_prediction-clintox": """Is <SMILES> {smiles} </SMILES> toxic?""",
+
+    "smol-property_prediction-hiv": """Can <SMILES> {smiles} </SMILES> serve as an inhibitor of HIV replication?""",
+
+    "smol-property_prediction-sider": """Are there any known side effects of <SMILES> {smiles} </SMILES> affecting the heart?""",
+
+    "tox21": """Is <SMILES> {smiles} </SMILES> toxic in the Tox21 assay?""",
+
+    "toxcast": """Is <SMILES> {smiles} </SMILES> toxic in the ToxCast assay?""",
+
+    # ============ Regression - Solubility/Lipophilicity ============
+    # SMolInstruct example: "How soluble is <SMILES> CC(C)Cl </SMILES> ?"
+    "smol-property_prediction-esol": """How soluble is <SMILES> {smiles} </SMILES> ?""",
+
+    "smol-property_prediction-lipo": """Predict the octanol/water distribution coefficient logD under the circumstance of pH 7.4 for <SMILES> {smiles} </SMILES> .""",
+
+    "aqsol-logS": """How soluble is <SMILES> {smiles} </SMILES> ?""",
+
+    # ============ Regression - QM9 ============
+    "qm9_homo": """What is the HOMO energy of <SMILES> {smiles} </SMILES> in Hartree?""",
+
+    "qm9_lumo": """What is the LUMO energy of <SMILES> {smiles} </SMILES> in Hartree?""",
+
+    "qm9_homo_lumo_gap": """What is the HOMO-LUMO gap of <SMILES> {smiles} </SMILES> in Hartree?""",
+
+    "qm9_dipole_moment": """What is the dipole moment of <SMILES> {smiles} </SMILES> in Debye?""",
+
+    "qm9_isotropic_polarizability": """What is the isotropic polarizability of <SMILES> {smiles} </SMILES> in Bohr³?""",
+
+    "qm9_electronic_spatial_extent": """What is the electronic spatial extent of <SMILES> {smiles} </SMILES> in Bohr²?""",
+
+    "qm9_zero_point_vibrational_energy": """What is the zero point vibrational energy of <SMILES> {smiles} </SMILES> in Hartree?""",
+
+    "qm9_heat_capacity_298K": """What is the heat capacity at 298.15K of <SMILES> {smiles} </SMILES> in cal/(mol·K)?""",
+
+    "qm9_internal_energy_298K": """What is the internal energy at 298.15K of <SMILES> {smiles} </SMILES> in Hartree?""",
+
+    "qm9_enthalpy_298K": """What is the enthalpy at 298.15K of <SMILES> {smiles} </SMILES> in Hartree?""",
+
+    "qm9_free_energy_298K": """What is the free energy at 298.15K of <SMILES> {smiles} </SMILES> in Hartree?""",
+
+    # ============ Regression - Alchemy ============
+    "alchemy_homo": """What is the HOMO energy of <SMILES> {smiles} </SMILES> in Hartree?""",
+
+    "alchemy_lumo": """What is the LUMO energy of <SMILES> {smiles} </SMILES> in Hartree?""",
+
+    "alchemy_homo_lumo_gap": """What is the HOMO-LUMO gap of <SMILES> {smiles} </SMILES> in Hartree?""",
+
+    "pcqm_homo_lumo_gap": """What is the HOMO-LUMO gap of <SMILES> {smiles} </SMILES> in eV?""",
+
+    # ============ Mol2Text ============
+    # SMolInstruct example: "Describe this molecule: <SMILES> ... </SMILES>"
+    "chebi-20-mol2text": """Describe this molecule: <SMILES> {smiles} </SMILES>""",
+
+    "smol-molecule_captioning": """Describe this molecule: <SMILES> {smiles} </SMILES>""",
+
+    # ============ Text2Mol ============
+    # SMolInstruct example: "Give me a molecule that satisfies the conditions outlined in the description: ..."
+    "chebi-20-text2mol": """Give me a molecule that satisfies the conditions outlined in the description: {description}""",
+
+    "smol-molecule_generation": """Give me a molecule that satisfies the conditions outlined in the description: {description}""",
+
+    # ============ Reaction - Forward Synthesis ============
+    # SMolInstruct example: "<SMILES> ... </SMILES> Based on the reactants and reagents given above, suggest a possible product."
+    "forward_reaction_prediction": """<SMILES> {smiles} </SMILES> Based on the reactants and reagents given above, suggest a possible product.""",
+
+    "smol-forward_synthesis": """<SMILES> {smiles} </SMILES> Based on the reactants and reagents given above, suggest a possible product.""",
+
+    "presto-forward_reaction_prediction": """<SMILES> {smiles} </SMILES> Based on the reactants and reagents given above, suggest a possible product.""",
+
+    "orderly-forward_reaction_prediction": """<SMILES> {smiles} </SMILES> Based on the reactants and reagents given above, suggest a possible product.""",
+
+    # ============ Reaction - Retrosynthesis ============
+    # SMolInstruct example: "Identify possible reactants that could have been used to create the specified product. <SMILES> ... </SMILES>"
+    "retrosynthesis": """Identify possible reactants that could have been used to create the specified product. <SMILES> {smiles} </SMILES>""",
+
+    "smol-retrosynthesis": """Identify possible reactants that could have been used to create the specified product. <SMILES> {smiles} </SMILES>""",
+
+    "presto-retrosynthesis": """Identify possible reactants that could have been used to create the specified product. <SMILES> {smiles} </SMILES>""",
+
+    "orderly-retrosynthesis": """Identify possible reactants that could have been used to create the specified product. <SMILES> {smiles} </SMILES>""",
+
+    # ============ Reaction - Reagent Prediction ============
+    "reagent_prediction": """Given the reactants and product of a reaction <SMILES> {smiles} </SMILES>, predict the reagents or catalysts needed.""",
+
+    "presto-reagent_prediction": """Given the reactants and product of a reaction <SMILES> {smiles} </SMILES>, predict the reagents or catalysts needed.""",
+
+    "orderly-reagent_prediction": """Given the reactants and product of a reaction <SMILES> {smiles} </SMILES>, predict the reagents or catalysts needed.""",
+
+ }
+
+
 def selfies_to_smiles(selfies_str: str) -> Optional[str]:
     """SELFIES → SMILES (canonicalized)"""
     try:
@@ -401,7 +509,15 @@ def format_prompt_for_gpt(prompt: str, selfies_str: str, task_name: str) -> str:
 def format_prompt_for_llasmol(prompt: str, selfies_str: str, task_name: str) -> str:
     """
     Format prompt for LLaSMol model (Mistral-based instruction-tuned for chemistry)
-    Uses Mistral instruction format: <s>[INST] ... [/INST]
+
+    LlaSMolGeneration internally handles:
+    - SMILES canonicalization via canonicalize_smiles_in_text()
+    - [INST]...[/INST] wrapping via GeneralPrompter
+
+    So we only need to:
+    - Convert SELFIES to SMILES
+    - Use <SMILES>...</SMILES> tags (LlaSMol format)
+    - No [INST] wrapper needed
 
     Args:
         prompt: Original prompt text
@@ -409,7 +525,7 @@ def format_prompt_for_llasmol(prompt: str, selfies_str: str, task_name: str) -> 
         task_name: Task name (e.g., 'smol-property_prediction-lipo')
 
     Returns:
-        Formatted prompt for LLaSMol
+        Formatted prompt for LLaSMol (without [INST] wrapper, with <SMILES> tags)
     """
     # Convert SELFIES to SMILES (canonical)
     smiles_str = selfies_to_smiles(selfies_str)
@@ -426,11 +542,8 @@ def format_prompt_for_llasmol(prompt: str, selfies_str: str, task_name: str) -> 
     # Extract description for text2mol tasks
     description = extract_description_from_prompt(prompt)
 
-    # Get task-specific template
-    if task_base in CHEMDFM_PROMPTS:
-        template = CHEMDFM_PROMPTS[task_base]
-    else:
-        template = DEFAULT_PROMPTS.get(task_type, DEFAULT_PROMPTS["regression"])
+    # Get task-specific template (use LlaSMol-specific prompts with <SMILES> tags)
+    template = LLASMOL_PROMPTS[task_base]
 
     # Format the template
     if "{description}" in template and description:
@@ -440,9 +553,11 @@ def format_prompt_for_llasmol(prompt: str, selfies_str: str, task_name: str) -> 
     else:
         formatted = template
 
-    # LLaSMol (Mistral-style) wrapper format
-    # NOTE: <s> is added by tokenizer, so we don't include it here
-    return f"[INST] {formatted} [/INST]"
+    # Add Query/Response wrapper for LlaSMol
+    formatted = f"Query: {formatted}\nResponse: "
+
+    # Return without [INST] wrapper - LlaSMolGeneration adds it internally
+    return formatted
 
 
 def format_prompt_for_chemdfm(prompt: str, selfies_str: str, task_name: str) -> str:
@@ -698,20 +813,30 @@ class DataCollator(DataCollatorForSeq2Seq):
             ]
 
             # Apply model-specific formatting
+            # Use both llm_model and filename to identify the model
             model_name = self.args.llm_model.lower()
+            filename = getattr(self.args, 'filename', '').lower()
             new_prompt_text = []
+
+            # DEBUG: Print model detection info (first batch only)
+            if not getattr(self, '_debug_printed', False):
+                print(f"[DEBUG DataCollator] model_name={model_name}, filename={filename}")
+                print(f"[DEBUG DataCollator] 'llasmol' in filename: {'llasmol' in filename}, 'llasmol' in model_name: {'llasmol' in model_name}")
+                self._debug_printed = True
 
             for i, p in enumerate(prompt_text):
                 selfies_str = list_selfies[i]
                 task_name = task_names[i] if i < len(task_names) else ""
 
                 # Route to appropriate formatter
-                if 'galactica' in model_name:
-                    formatted_prompt = format_prompt_for_galactica(p, selfies_str, task_name)
-                elif 'chemdfm' in model_name:
-                    formatted_prompt = format_prompt_for_chemdfm(p, selfies_str, task_name)
-                elif 'llasmol' in model_name:
+                # Check filename first for LoRA-based models (e.g., LlaSMol uses base Mistral)
+                if 'llasmol' in filename or 'llasmol' in model_name:
+                    print("[DEBUG DataCollator] Using LlaSMol formatter")
                     formatted_prompt = format_prompt_for_llasmol(p, selfies_str, task_name)
+                elif 'galactica' in model_name or 'galactica' in filename:
+                    formatted_prompt = format_prompt_for_galactica(p, selfies_str, task_name)
+                elif 'chemdfm' in model_name or 'chemdfm' in filename:
+                    formatted_prompt = format_prompt_for_chemdfm(p, selfies_str, task_name)
                 elif 'llama' in model_name:
                     formatted_prompt = format_prompt_for_llama(p, selfies_str, task_name)
                 elif 'mistral' in model_name:

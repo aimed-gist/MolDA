@@ -6,10 +6,10 @@ bert_num_hidden_layers: 5
 
 projector_type: qformer
 
-llm_model: "osunlp/LlaSMol-Mistral-7B"
-tune_llm: freeze  # Zero-shot evaluation - freeze all parameters
+llm_model: "mistralai/Mistral-7B-v0.1"
+tune_llm: lora  # Load LoRA adapter
 peft_config: null
-peft_dir: ""
+peft_dir: "osunlp/LlaSMol-Mistral-7B"
 load_in_8bit: false
 lora_r: 64
 lora_alpha: 32
@@ -28,7 +28,7 @@ max_steps: -1
 max_epochs: 10
 every_n_epochs: 1
 task: null
-logging_dir: /workspace/Origin/Mol_llm_Origin/checkpoint/logs
+logging_dir: /workspace/Mol_DA_repo/Mol-LLM-Benchmark/checkpoint/logs
 llava_pretraining: 0
 second_stage_start_epoch: 4
 num_workers: 0
@@ -36,8 +36,8 @@ skip_sanity_check: false
 
 accumulate_grad_batches: 8
 total_batch_size: 512
-batch_size: 8
-inference_batch_size: 32
+batch_size: 24
+inference_batch_size: 1  # Testing: 4, 8, 16
 
 truncation: 1
 padding: max_length

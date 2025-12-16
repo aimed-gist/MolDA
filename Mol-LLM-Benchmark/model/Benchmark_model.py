@@ -25,6 +25,187 @@ from transformers import (
 logger = logging.getLogger(__name__)
 
 
+class LlaSMolBenchmarkLLM(nn.Module):
+    """
+    LlaSMol-specific benchmark wrapper using official LlaSMol generation code.
+    Uses LlaSMolGeneration from LLM4Chem repository.
+    """
+
+    def __init__(self, args):
+        super().__init__()
+        self.args = args
+
+        peft_dir = getattr(args, 'peft_dir', '')
+        llm_model = args.llm_model
+
+        print(f"[LlaSMolBenchmarkLLM] Initializing LlaSMol model")
+        print(f"[LlaSMolBenchmarkLLM] Base model: {llm_model}")
+        print(f"[LlaSMolBenchmarkLLM] LoRA adapter: {peft_dir}")
+
+        # Use official LlaSMol generation class
+        from model.llasmol.generation import LlaSMolGeneration
+
+        self.llasmol_generator = LlaSMolGeneration(
+            model_name=peft_dir,  # e.g., 'osunlp/LlaSMol-Mistral-7B'
+            base_model=llm_model,  # e.g., 'mistralai/Mistral-7B-v0.1'
+        )
+
+        # For compatibility with blip2_stage3
+        self.llm_tokenizer = self.llasmol_generator.tokenizer
+        self.llm_model = self.llasmol_generator.model
+
+        print(f"[LlaSMolBenchmarkLLM] Model loaded and LoRA merged successfully")
+
+    def init_tokenizer(self):
+        """Return tokenizer for compatibility with blip2_stage3"""
+        return self.llm_tokenizer
+
+    def forward(self, batch):
+        """
+        Forward pass - text only (no graph embeddings)
+        """
+        input_ids = batch.input_ids
+        attention_mask = batch.attention_mask
+        target_ids = batch.labels
+
+        # Prepare targets to ignore pad tokens in loss calculation
+        targets = target_ids.masked_fill(
+            target_ids == self.llm_tokenizer.pad_token_id, -100
+        )
+
+        # Pure LLM forward pass
+        outputs = self.llm_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            return_dict=True,
+            labels=targets,
+        )
+
+        # Calculate instance loss (per-sample loss)
+        from model.blip2_stage3 import get_instance_loss
+        loss_dict = get_instance_loss(logits=outputs.logits, labels=targets)
+
+        results = {
+            "loss": loss_dict["loss"],
+            "instance_loss": loss_dict["instance_loss"],
+            "logits": outputs.logits,
+        }
+
+        return results
+
+    def generate(
+        self,
+        graphs=None,
+        input_ids=None,
+        attention_mask=None,
+        is_mol_token=None,
+        do_sample=False,
+        num_beams=5,
+        max_length=128,
+        min_length=1,
+        top_p=0.9,
+        repetition_penalty=1.0,
+        length_penalty=1.0,
+        num_captions=1,
+        temperature=1,
+        output_attentions=False,
+        prompt_texts=None,  # Raw prompt texts for LlaSMol generation
+    ):
+        """
+        Generate text using official LlaSMol generation code.
+
+        If prompt_texts is provided, use LlaSMolGeneration.generate() directly.
+        Otherwise, fall back to standard generation with input_ids.
+        """
+        if prompt_texts is not None:
+            # Use official LlaSMol generation
+            generation_settings = {
+                'num_beams': num_beams,
+                'num_return_sequences': num_captions,
+            }
+            if do_sample:
+                generation_settings['do_sample'] = True
+                generation_settings['top_p'] = top_p
+                generation_settings['temperature'] = temperature
+
+            results = self.llasmol_generator.generate(
+                input_text=prompt_texts,
+                batch_size=len(prompt_texts),
+                max_new_tokens=max_length,
+                canonicalize_smiles=False,
+                **generation_settings,
+            )
+
+            # Extract predictions
+            predictions = []
+            for result in results:
+                if result['output'] is not None:
+                    predictions.append(result['output'][0] if result['output'] else "")
+                else:
+                    predictions.append("")
+
+            # Create output object compatible with blip2_stage3
+            class GenerateOutput:
+                pass
+            outputs = GenerateOutput()
+            outputs.predictions = predictions
+            outputs.sequences = None
+            outputs.logits = None
+            outputs.attentions = None
+
+            return outputs
+
+        # Fallback: standard generation with input_ids
+        outputs = self.llm_model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            do_sample=do_sample,
+            top_p=top_p,
+            temperature=temperature,
+            num_beams=num_beams,
+            max_new_tokens=max_length,
+            min_new_tokens=min_length,
+            eos_token_id=self.llm_tokenizer.eos_token_id,
+            pad_token_id=self.llm_tokenizer.pad_token_id,
+            repetition_penalty=repetition_penalty,
+            length_penalty=length_penalty,
+            num_return_sequences=num_captions,
+            output_scores=True,
+            return_dict_in_generate=True,
+            output_attentions=output_attentions,
+        )
+
+        # Process logits
+        batch_size, sequence_length = outputs.sequences.shape
+        logits_stacked = torch.zeros(
+            batch_size,
+            0,
+            self.llm_model.config.vocab_size,
+            device=outputs.sequences.device,
+        )
+
+        if hasattr(outputs, 'scores') and outputs.scores:
+            for i in range(len(outputs.scores)):
+                logits = outputs.scores[i].unsqueeze(1)
+                if num_beams > 1:
+                    logits = logits.view(batch_size, num_beams, -1).max(dim=1).values.unsqueeze(1)
+                logits_stacked = torch.cat([logits_stacked, logits], dim=1)
+
+        outputs.logits = logits_stacked
+
+        # Decode predictions
+        prompt_length = input_ids.shape[1]
+        generated_sequences = outputs.sequences[:, prompt_length:]
+
+        output_text = self.llm_tokenizer.batch_decode(
+            generated_sequences, skip_special_tokens=False
+        )
+        output_text = [text.strip() for text in output_text]
+        outputs.predictions = output_text
+
+        return outputs
+
+
 class BenchmarkLLM(nn.Module):
     """
     Pure LLM wrapper for benchmark testing
