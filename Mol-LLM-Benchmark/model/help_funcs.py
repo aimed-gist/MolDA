@@ -485,13 +485,15 @@ def per_device_evaluate(
 
         _converted_predictions = None
         if task_name in REGRESSION_BENCHMARKS:
-            results, _failed_cases = regression_evaluate(
+            results, _failed_cases, _converted_predictions = regression_evaluate(
                 predictions=task_predictions,
                 targets=task_targets,
                 prompts=task_prompts,
                 input_mol_strings=task_input_mol_strings,
                 flexible_parsing=flexible_parsing,
             )
+            # 변환된 predictions로 업데이트
+            task_specific_predictions[t] = _converted_predictions
         elif (
             task_name in TEXT2MOL_BENCHMARKS + REACTION_BENCHMARKS
         ):  # output is a molecule
@@ -532,7 +534,8 @@ def per_device_evaluate(
     converted_predictions = []
     for i, task in enumerate(tasks):
         task_name = task.split("/")[0]
-        if task_name in TEXT2MOL_BENCHMARKS + REACTION_BENCHMARKS:
+        # REGRESSION_BENCHMARKS도 변환된 predictions 사용
+        if task_name in TEXT2MOL_BENCHMARKS + REACTION_BENCHMARKS + REGRESSION_BENCHMARKS:
             if task in task_specific_predictions:
                 # task_specific_predictions[task]에서 해당 인덱스의 변환된 prediction 가져오기
                 task_preds = task_specific_predictions[task]
@@ -657,8 +660,11 @@ def parse_flexible_classification(text):
         return None
 
     # Clean up text - remove EOS tokens
-    for eos_token in ['</s>', '<|end_of_text|>', '<|endoftext|>', '[EOS]', '<eos>']:
+    for eos_token in ['</s>', '<|end_of_text|>', '<|endoftext|>', '[EOS]', '<eos>', '<|eot_id|>']:
         text = text.replace(eos_token, '')
+
+    # Remove "Answer:" prefix (common in Galactica outputs)
+    text = re.sub(r'^Answer\s*:\s*', '', text.strip(), flags=re.IGNORECASE)
 
     text_lower = text.lower().strip()
 
@@ -806,9 +812,13 @@ def parse_flexible_molecule(text):
     if not text:
         return None
 
+    # Remove "Answer:" prefix (common in Galactica outputs)
+    text = re.sub(r'^Answer\s*:\s*', '', text.strip(), flags=re.IGNORECASE)
+
     # Truncate at EOS token if present
-    if '</s>' in text:
-        text = text.split('</s>')[0]
+    for eos_token in ['</s>', '<|eot_id|>']:
+        if eos_token in text:
+            text = text.split(eos_token)[0]
 
     # Store original text for tag-based extraction (tags may span multiple lines)
     original_text = text
@@ -841,19 +851,22 @@ def parse_flexible_molecule(text):
 
     # 1c. Try LlaSMol format with only closing tag: ...SMILES... </SMILES>
     # Model sometimes generates SMILES without opening tag
-    match = re.search(r'^(.*?)\s*</SMILES>', original_text)
-    if match:
-        smiles_str = match.group(1).strip()
-        # Try original first
+    # Handle cases with multiple </SMILES> tags - try all segments between them
+    smiles_segments = re.split(r'\s*</SMILES>\s*', original_text)
+    for segment in smiles_segments:
+        segment = segment.strip()
+        if not segment:
+            continue
+        # Try the segment directly
         try:
-            mol = Chem.MolFromSmiles(smiles_str)
+            mol = Chem.MolFromSmiles(segment)
             if mol is not None:
-                return smiles_str
+                return segment
         except:
             pass
-        # Try extracting SMILES-like pattern from the text
+        # Try extracting SMILES-like pattern from the segment
         # SMILES typically contains: letters, numbers, parentheses, brackets, =, #, @, +, -, ., :
-        smiles_pattern = re.search(r'[A-Za-z0-9@+\-\[\]()=#\.:]+', smiles_str)
+        smiles_pattern = re.search(r'[A-Za-z0-9@+\-\[\]()=#\.:]+', segment)
         if smiles_pattern:
             potential_smiles = smiles_pattern.group()
             try:
@@ -864,8 +877,8 @@ def parse_flexible_molecule(text):
                 pass
         # Try removing common prefixes like "(S)", "(C", etc.
         for prefix_pattern in [r'^\([A-Z]\)\s*', r'^\([A-Z][^)]*\)\s*']:
-            cleaned = re.sub(prefix_pattern, '', smiles_str)
-            if cleaned != smiles_str:
+            cleaned = re.sub(prefix_pattern, '', segment)
+            if cleaned != segment:
                 try:
                     mol = Chem.MolFromSmiles(cleaned)
                     if mol is not None:
@@ -925,6 +938,9 @@ def parse_flexible_caption(text):
     if not text:
         return None
 
+    # Remove "Answer:" or "Description:" prefix (common in Galactica outputs)
+    text = re.sub(r'^(Answer|Description)\s*:\s*', '', text.strip(), flags=re.IGNORECASE)
+
     # 1. Try Mol-LLM format first
     match = re.search(r'<DESCRIPTION>\s*(.*?)\s*</DESCRIPTION>', text, re.DOTALL)
     if match:
@@ -937,7 +953,7 @@ def parse_flexible_caption(text):
 
     # 2. Plain text: clean up EOS tokens and extra whitespace
     # Remove common EOS tokens
-    for eos_token in ['</s>', '<|end_of_text|>', '<|endoftext|>', '[EOS]', '<eos>']:
+    for eos_token in ['</s>', '<|end_of_text|>', '<|endoftext|>', '[EOS]', '<eos>', '<|eot_id|>']:
         text = text.replace(eos_token, '')
 
     # Remove any remaining special tokens like <s>, [PAD], etc.
@@ -971,8 +987,11 @@ def parse_flexible_number(text):
     if not text:
         return None
 
+    # Remove "Answer:" prefix (common in Galactica outputs)
+    text = re.sub(r'^Answer\s*:\s*', '', text.strip(), flags=re.IGNORECASE)
+
     # Truncate at EOS tokens if present (different models use different tokens)
-    for eos_token in ['</s>', '<|end_of_text|>', '<|endoftext|>', '[EOS]']:
+    for eos_token in ['</s>', '<|end_of_text|>', '<|endoftext|>', '[EOS]', '<|eot_id|>']:
         if eos_token in text:
             text = text.split(eos_token)[0]
 
@@ -1030,6 +1049,7 @@ def regression_evaluate(predictions, targets, prompts, input_mol_strings, flexib
     total_labels = []
     total_predictions = []
     failure_idxs = []
+    converted_predictions = []  # 파싱된 결과 저장
 
     for i in range(len(predictions)):
         label = (
@@ -1047,8 +1067,10 @@ def regression_evaluate(predictions, targets, prompts, input_mol_strings, flexib
             if prediction is not None:
                 total_labels.append(label)
                 total_predictions.append(prediction)
+                converted_predictions.append(str(prediction))  # 파싱된 숫자를 문자열로 저장
             else:
                 failure_idxs.append(i)
+                converted_predictions.append(predictions[i])  # 실패 시 원본 유지
         else:
             # Standard mode: strict Mol-LLM format parsing
             try:
@@ -1066,8 +1088,10 @@ def regression_evaluate(predictions, targets, prompts, input_mol_strings, flexib
 
                 total_labels.append(label)
                 total_predictions.append(prediction)
+                converted_predictions.append(str(prediction))
             except:
                 failure_idxs.append(i)
+                converted_predictions.append(predictions[i])
     failure_rate = len(failure_idxs) / len(predictions)
 
     # Calculate regression metrics: mae, mse, rmse
@@ -1090,4 +1114,4 @@ def regression_evaluate(predictions, targets, prompts, input_mol_strings, flexib
         "prompts": [prompts[i] for i in failure_idxs],
         "input_mol_strings": [input_mol_strings[i] for i in failure_idxs],
     }
-    return evaluation_results, failed_cases
+    return evaluation_results, failed_cases, converted_predictions
