@@ -386,6 +386,56 @@ def extract_description_from_prompt(prompt_text: str) -> Optional[str]:
     return None
 
 
+def extract_user_prompt_from_llada(prompt_text: str) -> str:
+    """
+    LLaDA-8B 형식에서 user prompt 부분만 추출
+
+    LLaDA format:
+    <|startoftext|><|start_header_id|>system<|end_header_id|>
+    {system_prompt}<|eot_id|><|start_header_id|>user<|end_header_id|>
+    {user_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+    Returns:
+        user_prompt 부분만 추출 (SELFIES, GRAPH 태그 포함)
+    """
+    # user<|end_header_id|>\n\n 와 <|eot_id|><|start_header_id|>assistant 사이의 내용 추출
+    match = re.search(
+        r'<\|start_header_id\|>user<\|end_header_id\|>\s*\n\n(.*?)<\|eot_id\|>',
+        prompt_text,
+        re.DOTALL
+    )
+    if match:
+        return match.group(1).strip()
+
+    # 매칭 실패시 원본 반환
+    return prompt_text
+
+
+def extract_user_prompt_from_author(prompt_text: str) -> str:
+    """
+    Author(원본) 데이터 형식에서 user prompt 부분만 추출
+
+    Author format:
+    <s>[INST] You are a helpful assistant...
+    {user_prompt} [/INST]
+
+    Returns:
+        user_prompt 부분만 추출 (시스템 프롬프트 제외, SELFIES/GRAPH 태그 포함)
+    """
+    # <s>[INST] 제거
+    prompt = re.sub(r'^<s>\s*\[INST\]\s*', '', prompt_text)
+    # [/INST] 제거
+    prompt = re.sub(r'\s*\[/INST\]\s*$', '', prompt)
+    # 시스템 프롬프트 제거 (첫 번째 빈 줄 이후가 실제 user prompt)
+    # "You are a helpful assistant..." 부분 제거
+    prompt = re.sub(
+        r'^You are a helpful assistant[^\n]*\n\n',
+        '',
+        prompt
+    )
+    return prompt.strip()
+
+
 def get_task_type(task_name: str) -> str:
     """Task 이름으로 task type 반환"""
     task_base = task_name.split("/")[0]
@@ -553,10 +603,8 @@ def format_prompt_for_llasmol(prompt: str, selfies_str: str, task_name: str) -> 
     else:
         formatted = template
 
-    # Add Query/Response wrapper for LlaSMol
-    formatted = f"Query: {formatted}\nResponse: "
-
     # Return without [INST] wrapper - LlaSMolGeneration adds it internally
+    # Note: No Query/Response wrapper needed - SMolInstruct format is just the question itself
     return formatted
 
 
@@ -806,11 +854,20 @@ class DataCollator(DataCollatorForSeq2Seq):
 
         # Apply model-specific prompt formatting for benchmark mode
         if hasattr(self.args, 'benchmark') and self.args.benchmark:
-            # First, remove instruction formatting for all base models
-            prompt_text = [
-                re.sub(r'<s>\[INST\]\s*', '', p).replace('[/INST]', '')
-                for p in prompt_text
-            ]
+            # Detect data format based on direct_data_root path
+            data_root = getattr(self.args, 'direct_data_root', '') or ''
+            is_llada_data = 'GSAI-ML-LLaDA-8B-Instruct' in data_root
+
+            # Extract user prompt based on data format
+            if is_llada_data:
+                # LLaDA-8B format: extract user prompt from special tokens
+                prompt_text = [extract_user_prompt_from_llada(p) for p in prompt_text]
+            else:
+                # Author (original) format: remove [INST] wrapper
+                prompt_text = [
+                    re.sub(r'<s>\[INST\]\s*', '', p).replace('[/INST]', '')
+                    for p in prompt_text
+                ]
 
             # Apply model-specific formatting
             # Use both llm_model and filename to identify the model
@@ -820,8 +877,6 @@ class DataCollator(DataCollatorForSeq2Seq):
 
             # DEBUG: Print model detection info (first batch only)
             if not getattr(self, '_debug_printed', False):
-                print(f"[DEBUG DataCollator] model_name={model_name}, filename={filename}")
-                print(f"[DEBUG DataCollator] 'llasmol' in filename: {'llasmol' in filename}, 'llasmol' in model_name: {'llasmol' in model_name}")
                 self._debug_printed = True
 
             for i, p in enumerate(prompt_text):
@@ -831,7 +886,6 @@ class DataCollator(DataCollatorForSeq2Seq):
                 # Route to appropriate formatter
                 # Check filename first for LoRA-based models (e.g., LlaSMol uses base Mistral)
                 if 'llasmol' in filename or 'llasmol' in model_name:
-                    print("[DEBUG DataCollator] Using LlaSMol formatter")
                     formatted_prompt = format_prompt_for_llasmol(p, selfies_str, task_name)
                 elif 'galactica' in model_name or 'galactica' in filename:
                     formatted_prompt = format_prompt_for_galactica(p, selfies_str, task_name)
