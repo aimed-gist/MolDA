@@ -34,6 +34,12 @@ results/
 - accuracy = mean(correct)
 - f1, precision, recall = sklearn.metrics 사용
 - roc_auc = sklearn.metrics.roc_auc_score(label_parsed, prob)
+- roc_auc_all = 전체 샘플 포함 (파싱 실패도 포함)
+
+**roc_auc vs roc_auc_all 차이**:
+- `roc_auc`: 파싱 실패(prob=-1) 샘플을 **제외**하고 계산. 유효한 prob만 사용하여 모델의 순수 성능 측정.
+- `roc_auc_all`: 파싱 실패 포함 **전체** 샘플로 계산. prob=-1인 샘플도 그대로 사용 (온라인 평가와 동일).
+- `failure_rate`: 파싱 실패 비율 (prob < 0인 샘플 비율)
 
 ---
 

@@ -739,21 +739,28 @@ def parse_flexible_classification(text):
 
 
 def convert_logit2binary_prob(logits, predictions, tokenizer):
-    # WARNING: for specific LLM tokenizer, behaviour might be different
-    # below code is for mistral7B tokenizer
-    # if you want to use this function for other tokenizer, you should check working, and modify if necessary
-    True_token_id = tokenizer.encode("True")[-1]
-    False_token_id = tokenizer.encode("False")[-1]
+    """
+    Convert logits to binary probabilities.
+    Supports multiple output formats:
+    1. Mol-LLM format: <BOOLEAN>True</BOOLEAN> or <BOOLEAN>False</BOOLEAN>
+    2. Benchmark format: True, true, False, false, Yes, yes, No, no (standalone words)
+
+    For each prediction:
+    - Find which word was output (True/False or Yes/No)
+    - Use the corresponding token pair's logits for softmax
+    - Return [prob_negative, prob_positive]
+    """
+    # Get token IDs for all possible answer tokens
+    True_token_id = tokenizer.encode("True", add_special_tokens=False)[-1]
+    False_token_id = tokenizer.encode("False", add_special_tokens=False)[-1]
+    Yes_token_id = tokenizer.encode("Yes", add_special_tokens=False)[-1]
+    No_token_id = tokenizer.encode("No", add_special_tokens=False)[-1]
 
     bos_token, eos_token = added_tokens.BOOL
 
-    # Handle different tokenizer types
-    # Some tokenizers (like Galactica/OPT) don't accept list input for encode()
     try:
-        # Try list input first (Mistral and most tokenizers)
         boolean_bos_id = tokenizer.encode([bos_token])[-1]
     except (TypeError, ValueError):
-        # Fallback to string input (Galactica/OPT tokenizers)
         boolean_bos_id = tokenizer.encode(bos_token)[-1]
 
     prediction_position_ids = torch.zeros(logits.shape[:-1], dtype=torch.bool)
@@ -761,34 +768,69 @@ def convert_logit2binary_prob(logits, predictions, tokenizer):
         (logits.shape[0], 2), dtype=torch.bool
     ).to(logits.device)
 
+    # Track which token pair to use for each prediction (True/False or Yes/No)
+    # True = use True/False pair, False = use Yes/No pair
+    use_true_false_pair = [True] * logits.shape[0]
+
     for idx, pred in enumerate(predictions):
-        # first, inspect that pred includes boolean tokens
-        # second, inspect that there is only one token between boolean tokens
-        # third, get position id of the prediction token between the boolean tokens
         pred_token_ids = tokenizer.encode(pred, add_special_tokens=False)
+        found_position = False
+
+        # 1. Try <BOOLEAN> tag first (Mol-LLM format) - always uses True/False
         try:
-            assert re.search(
-                f"{bos_token}.+{eos_token}", pred
-            ).group(), f"pred should be searched by re pattern {bos_token}.+{eos_token}"
+            assert re.search(f"{bos_token}.+{eos_token}", pred).group()
             boolean_bos_position = pred_token_ids.index(boolean_bos_id)
             prediction_position_ids[idx, boolean_bos_position + 1] = True
             is_using_prediction_position_ids[idx, :] = True
+            use_true_false_pair[idx] = True
+            found_position = True
         except:
+            pass
+
+        # 2. If no <BOOLEAN> tag, find standalone word using regex
+        if not found_position:
+            match = re.search(r'\b(True|true|False|false|Yes|yes|No|no)\b', pred)
+            if match:
+                matched_word = match.group(1).lower()
+                prediction_position_ids[idx, 0] = True
+                is_using_prediction_position_ids[idx, :] = True
+                # Determine which token pair to use based on matched word
+                if matched_word in ['yes', 'no']:
+                    use_true_false_pair[idx] = False
+                else:
+                    use_true_false_pair[idx] = True
+                found_position = True
+
+        if not found_position:
             prediction_position_ids[idx, 0] = True
             is_using_prediction_position_ids[idx, :] = False
 
-    true_logits = logits[prediction_position_ids][:, True_token_id]
-    false_logits = logits[prediction_position_ids][:, False_token_id]
+    # Extract logits at found positions
+    position_logits = logits[prediction_position_ids]
 
-    total_logits = torch.cat(
-        [false_logits.unsqueeze(1), true_logits.unsqueeze(1)], dim=-1
-    )
-    total_probs = total_logits.softmax(-1)
+    # Calculate probabilities for each prediction using appropriate token pair
+    total_probs_list = []
+    for idx in range(position_logits.shape[0]):
+        if use_true_false_pair[idx]:
+            # Use True/False token pair
+            pos_logit = position_logits[idx, True_token_id]
+            neg_logit = position_logits[idx, False_token_id]
+        else:
+            # Use Yes/No token pair
+            pos_logit = position_logits[idx, Yes_token_id]
+            neg_logit = position_logits[idx, No_token_id]
+
+        # Softmax over the two logits
+        pair_logits = torch.stack([neg_logit, pos_logit])
+        pair_probs = pair_logits.softmax(dim=0)
+        total_probs_list.append(pair_probs)
+
+    total_probs = torch.stack(total_probs_list, dim=0)
 
     total_probs = torch.where(
         is_using_prediction_position_ids,
         total_probs,
-        torch.full_like(total_probs, -1),
+        torch.full_like(total_probs, -1.0),  # 파싱 실패 시 -1로 표시
     )
 
     total_probs = [p.tolist() for p in total_probs]
@@ -959,6 +1001,14 @@ def parse_flexible_caption(text):
     # Remove any remaining special tokens like <s>, [PAD], etc.
     text = re.sub(r'<[^>]+>', '', text)
     text = re.sub(r'\[[A-Z]+\]', '', text)
+
+    # 3. Galactica-specific: Remove "Figure X:" pattern and everything after
+    # This handles cases where Galactica generates paper-like outputs
+    text = re.sub(r'\n*\s*Figure\s+\d+\s*:.*', '', text, flags=re.DOTALL)
+
+    # Also remove content after double newlines (unrelated continuation)
+    if '\n\n' in text:
+        text = text.split('\n\n')[0]
 
     # Clean up whitespace
     text = text.strip()

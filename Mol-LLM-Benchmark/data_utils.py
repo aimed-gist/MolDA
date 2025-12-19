@@ -479,50 +479,63 @@ def format_prompt_for_galactica(prompt: str, selfies_str: str, task_name: str) -
 
     # 원본 프롬프트 기반으로 Galactica 포맷 적용
     formatted = prompt
-
-    # 1. <s>[INST]...[/INST] 포맷 제거 (Galactica는 instruction-tuned 모델이 아님)
-    formatted = re.sub(r'^<s>\s*', '', formatted)
-    formatted = re.sub(r'\[INST\]\s*', '', formatted)
-    formatted = re.sub(r'\s*\[/INST\]\s*$', '', formatted)
-
-    # 2. <GRAPH>...</GRAPH> 태그 제거 (Galactica는 그래프 이해 못함)
-    formatted = re.sub(r'<GRAPH>.*?</GRAPH>', '', formatted)
-
-    # 3. SELFIES 태그를 Galactica SMILES 포맷으로 변환
-    # <SELFIES>...</SELFIES> → [START_I_SMILES]...[END_I_SMILES]
-    # Note: SMILES에 \N 등 특수문자가 있을 수 있어 re.sub 대신 split/join 사용
     galactica_mol_format = f'[START_I_SMILES]{smiles_str}[END_I_SMILES]'
 
+    # 1. <|startoftext|> 제거
+    formatted = formatted.replace('<|startoftext|>', '')
+
+    # 2. <GRAPH>...</GRAPH> 태그 제거
+    formatted = re.sub(r'<GRAPH>.*?</GRAPH>', '', formatted, flags=re.DOTALL)
+
+    # 3. <SELFIES>...</SELFIES> 태그를 Galactica SMILES 포맷으로 변환
+    # re.sub 대신 find/replace 사용 (SMILES에 \C 등 escape 문자가 있어서)
     if '<SELFIES>' in formatted and '</SELFIES>' in formatted:
-        # re.sub 대신 split/join 사용하여 escape 문제 회피
-        parts = re.split(r'<SELFIES>\s*[^<]*\s*</SELFIES>', formatted)
-        formatted = galactica_mol_format.join(parts)
-    elif selfies_str in formatted:
-        formatted = formatted.replace(selfies_str, galactica_mol_format)
+        start_idx = formatted.find('<SELFIES>')
+        end_idx = formatted.find('</SELFIES>') + len('</SELFIES>')
+        formatted = formatted[:start_idx] + galactica_mol_format + formatted[end_idx:]
 
-    # 4. 기존 SMILES 표기가 있으면 Galactica 포맷으로 변환
-    smiles_match = re.search(r'SMILES:\s*([^\n\[]+?)(?=\n|$)', formatted)
-    if smiles_match:
-        formatted = formatted[:smiles_match.start()] + galactica_mol_format + formatted[smiles_match.end():]
+    # 4. Llama3 형식 태그 제거 (내용은 유지)
+    # 순서 중요: 복합 태그를 먼저 처리한 후 단일 태그 처리
+    formatted = formatted.replace('<|start_header_id|>system<|end_header_id|>\n\n', '')
+    formatted = formatted.replace('<|start_header_id|>system<|end_header_id|>', '')
+    formatted = formatted.replace('<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n', '\n\n')
+    formatted = formatted.replace('<|eot_id|><|start_header_id|>user<|end_header_id|>', '\n\n')
+    formatted = formatted.replace('<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n', '\n')
+    formatted = formatted.replace('<|eot_id|><|start_header_id|>assistant<|end_header_id|>', '\n')
+    formatted = formatted.replace('<|eot_id|>', '')
 
-    # 5. 공백 정리
+    # 5. 기존 Mistral 형식 태그 제거
+    formatted = re.sub(r'^<s>\s*', '', formatted)
+    formatted = formatted.replace('[INST]', '')
+    formatted = formatted.replace('[/INST]', '')
+
+    # 6. 태그로 감싸지지 않은 "SELFIES" 단어를 "SMILES"로 변경
+    formatted = formatted.replace('SELFIES', 'SMILES')
+
+    # 7. 공백 정리 (2개 이상 줄바꿈을 1개로)
+    formatted = re.sub(r'\n{2,}', '\n', formatted)
     formatted = formatted.strip()
 
-    # 6. Task별 Answer hint 추가 (Galactica가 더 잘 응답하도록)
+    # 8. Task별 Answer hint 추가 (Galactica가 더 잘 응답하도록)
     task_type = get_task_type(task_name)
     if task_type == "classification":
         # True/False로 답하도록 유도
         formatted += "\nAnswer (True or False):"
     elif task_type == "regression":
-        formatted += "\nAnswer:"
+        # Galactica가 논문 형식으로 생성하는 것 방지, 숫자만 답하도록 유도
+        formatted += "\nAnswer with a number only:"
     elif task_type == "reaction":
         # SMILES로 답하도록 명확히 지시
         formatted += "\nAnswer with SMILES only. Product: [START_I_SMILES]"
     elif task_type == "mol2text":
-        formatted += "\nDescription:"
+        # Galactica가 논문 형식(Figure, Title, Abstract, [START_REF] 등)으로 생성하는 것 방지
+        formatted += "\nExplanation :"
     elif task_type == "text2mol":
         # SMILES로 답하도록 명확히 지시
         formatted += "\nAnswer with SMILES only: [START_I_SMILES]"
+
+    # 마지막 trailing whitespace 제거
+    formatted = formatted.rstrip()
 
     return formatted
 
@@ -858,26 +871,27 @@ class DataCollator(DataCollatorForSeq2Seq):
             data_root = getattr(self.args, 'direct_data_root', '') or ''
             is_llada_data = 'GSAI-ML-LLaDA-8B-Instruct' in data_root
 
-            # Extract user prompt based on data format
-            if is_llada_data:
-                # LLaDA-8B format: extract user prompt from special tokens
-                prompt_text = [extract_user_prompt_from_llada(p) for p in prompt_text]
-            else:
-                # Author (original) format: remove [INST] wrapper
-                prompt_text = [
-                    re.sub(r'<s>\[INST\]\s*', '', p).replace('[/INST]', '')
-                    for p in prompt_text
-                ]
-
             # Apply model-specific formatting
             # Use both llm_model and filename to identify the model
             model_name = self.args.llm_model.lower()
             filename = getattr(self.args, 'filename', '').lower()
-            new_prompt_text = []
 
-            # DEBUG: Print model detection info (first batch only)
-            if not getattr(self, '_debug_printed', False):
-                self._debug_printed = True
+            # Galactica는 시스템 프롬프트 포함한 원본을 사용하므로 전처리 스킵
+            is_galactica = 'galactica' in model_name or 'galactica' in filename
+
+            if not is_galactica:
+                # Extract user prompt based on data format (Galactica 제외)
+                if is_llada_data:
+                    # LLaDA-8B format: extract user prompt from special tokens
+                    prompt_text = [extract_user_prompt_from_llada(p) for p in prompt_text]
+                else:
+                    # Author (original) format: remove [INST] wrapper
+                    prompt_text = [
+                        re.sub(r'<s>\[INST\]\s*', '', p).replace('[/INST]', '')
+                        for p in prompt_text
+                    ]
+
+            new_prompt_text = []
 
             for i, p in enumerate(prompt_text):
                 selfies_str = list_selfies[i]
@@ -887,7 +901,7 @@ class DataCollator(DataCollatorForSeq2Seq):
                 # Check filename first for LoRA-based models (e.g., LlaSMol uses base Mistral)
                 if 'llasmol' in filename or 'llasmol' in model_name:
                     formatted_prompt = format_prompt_for_llasmol(p, selfies_str, task_name)
-                elif 'galactica' in model_name or 'galactica' in filename:
+                elif is_galactica:
                     formatted_prompt = format_prompt_for_galactica(p, selfies_str, task_name)
                 elif 'chemdfm' in model_name or 'chemdfm' in filename:
                     formatted_prompt = format_prompt_for_chemdfm(p, selfies_str, task_name)
@@ -1194,6 +1208,9 @@ class DataCollator(DataCollatorForSeq2Seq):
         ), f"features.labels.size(1)={features.labels.size(1)} > self.max_length={self.max_length}"
 
         features["tasks"] = torch.tensor(tasks, dtype=torch.int16)
+        # 원본 데이터셋의 idx 저장 (오프라인 평가용)
+        batch_idx = [sample.get("idx", i) for i, sample in enumerate(batch)]
+        features["idx"] = torch.tensor(batch_idx, dtype=torch.int64)
         # 문자열 리스트 저장 (transfer_batch_to_device에서 GPU 이동 스킵)
         features["raw_prompt_text"] = raw_prompt_text  # 원본 프롬프트 텍스트 (변환 전)
         features["prompt_text"] = prompt_text  # 변환된 프롬프트 텍스트

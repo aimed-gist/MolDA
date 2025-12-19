@@ -5,7 +5,7 @@ from model.blip2_opt import Blip2OPT
 from model.blip2_llama import Blip2Llama
 from model.blip2_mistral import Blip2Mistral
 from model.blip2_t5 import Blip2T5
-from model.Benchmark_model import BenchmarkLLM, LlaSMolBenchmarkLLM
+from model.Benchmark_model import BenchmarkLLM, LlaSMolBenchmarkLLM, ThreeDMoLMBenchmarkLLM
 import pytorch_lightning as pl
 from torch import optim
 from model.scheduler import LinearWarmupCosineLRScheduler, LinearWarmupStepLRScheduler
@@ -30,6 +30,7 @@ from data_utils import (
     REACTION_BENCHMARKS,
     id2task,
 )
+from model.result_saver import ResultSaver, get_task_type
 from transformers.utils import logging
 
 from torch.nn import CrossEntropyLoss
@@ -106,10 +107,14 @@ class Blip2Stage3(pl.LightningModule):
         is_benchmark_mode = getattr(args, 'benchmark', False)
 
         if is_benchmark_mode:
-            # Benchmark mode: galactica, llasmol, chemdfm 등 (text-only, no multimodal)
+            # Benchmark mode: galactica, llasmol, chemdfm, 3d-molm 등
             filename = (getattr(args, 'filename', '') or '').lower()
+            use_3d_molm = getattr(args, 'use_3d_molm', False)
 
-            if 'llasmol' in filename:
+            if use_3d_molm or '3d_molm' in filename or '3dmolm' in filename:
+                print(f"[Blip2Stage3] Benchmark mode - ThreeDMoLMBenchmarkLLM (filename: {filename})")
+                blip2model = ThreeDMoLMBenchmarkLLM
+            elif 'llasmol' in filename:
                 print(f"[Blip2Stage3] Benchmark mode - LlaSMolBenchmarkLLM (filename: {filename})")
                 blip2model = LlaSMolBenchmarkLLM
             else:
@@ -327,6 +332,195 @@ class Blip2Stage3(pl.LightningModule):
         with open(filepath, "a") as f:
             json.dump(instance, f, ensure_ascii=False)
             f.write("\n")
+
+    def _save_sample_with_metrics(
+        self,
+        task_base: str,
+        sample_idx: int,
+        target: str,
+        prediction: str,
+        prob=None,
+    ):
+        """
+        Task type에 따라 metric을 계산하고 CSV에 저장
+        - Classification: prob, correct
+        - Regression: parsed pred, error
+        - Molecule Generation: validity, exact_match, fingerprint similarities, levenshtein
+        - Captioning: parsed label/pred만 저장
+        """
+        import re
+
+        if task_base in CLASSIFICATION_BENCHMARKS:
+            # Classification: prob, correct 계산
+            label_val = 1 if ("True" in target or "true" in target) else 0
+
+            if prob and len(prob) >= 2 and prob[0] >= 0:
+                pred_val = 1 if prob[1] > prob[0] else 0
+                prob_val = prob[1]
+            else:
+                # 파싱 실패 시 pred=0으로 처리 (원작자 의도)
+                pred_val = 0
+                prob_val = -1.0
+
+            correct = int(pred_val == label_val)
+
+            self.result_saver.add_classification_sample(
+                idx=sample_idx, task=task_base, label=target,
+                pred=pred_val, prob=prob_val, correct=correct,
+            )
+
+        elif task_base in REGRESSION_BENCHMARKS:
+            # Regression: parsed pred, error 계산
+            # Parse target
+            match = re.search(r"(?<=<FLOAT>).*?(?=</FLOAT>)", target)
+            if match:
+                inner = match.group().replace(" ", "").replace("<|", "").replace("|>", "")
+                try:
+                    label_val = float(inner)
+                except:
+                    label_val = None
+            else:
+                label_val = None
+
+            # Parse prediction
+            pred_val = parse_flexible_number(prediction)
+
+            if pred_val is not None and label_val is not None:
+                error = pred_val - label_val
+            else:
+                error = float('nan')
+                if pred_val is None:
+                    pred_val = float('nan')
+
+            self.result_saver.add_regression_sample(
+                idx=sample_idx, task=task_base, label=target,
+                pred=pred_val, error=error,
+            )
+
+        elif task_base in TEXT2MOL_BENCHMARKS or task_base in REACTION_BENCHMARKS:
+            # Molecule Generation: validity, exact_match, fingerprints, levenshtein
+            self._save_molecule_generation_sample(
+                sample_idx, task_base, target, prediction
+            )
+
+        elif task_base in MOL2TEXT_BENCHMARKS:
+            # Captioning: parsed pred만 저장
+            pred_text = parse_flexible_caption(prediction)
+            if pred_text is None:
+                pred_text = prediction
+
+            self.result_saver.add_captioning_sample(
+                idx=sample_idx, task=task_base, label=target, pred=pred_text,
+            )
+
+        else:
+            # Unknown task - 기본 저장
+            self.result_saver.add_sample(
+                task=task_base, idx=sample_idx, label=target, pred=prediction,
+            )
+
+    def _save_molecule_generation_sample(
+        self,
+        sample_idx: int,
+        task_base: str,
+        target: str,
+        prediction: str,
+    ):
+        """Molecule generation 샘플의 metric 계산 후 저장"""
+        import re
+
+        validity = 0
+        exact_match = 0
+        maccs_fts = None
+        rdk_fts = None
+        morgan_fts = None
+        levenshtein = None
+        pred_smiles = prediction
+
+        try:
+            import selfies
+            from rdkit import Chem, RDLogger
+            from rdkit.Chem import MACCSkeys, AllChem
+            from rdkit import DataStructs
+            from Levenshtein import distance as lev
+            RDLogger.DisableLog('rdApp.*')
+
+            # Parse target SELFIES -> SMILES
+            target_selfies_match = re.search(
+                r"(?<=<SELFIES>).*?(?=</SELFIES>)", target.replace(" ", "")
+            )
+            if not target_selfies_match:
+                target_selfies_match = re.search(
+                    r"(?<=<SELFIES>).*", target.replace(" ", "")
+                )
+
+            target_smiles = None
+            target_mol = None
+            if target_selfies_match:
+                try:
+                    target_selfies = target_selfies_match.group()
+                    target_smiles = selfies.decoder(target_selfies)
+                    target_mol = Chem.MolFromSmiles(target_smiles)
+                except:
+                    pass
+
+            # Parse prediction using flexible parser
+            pred_mol = None
+            parsed_mol = parse_flexible_molecule(prediction)
+            if parsed_mol:
+                try:
+                    # SELFIES인지 SMILES인지 판단
+                    if parsed_mol.startswith('[') and ']' in parsed_mol:
+                        pred_smiles = selfies.decoder(parsed_mol)
+                    else:
+                        pred_smiles = parsed_mol
+                    pred_mol = Chem.MolFromSmiles(pred_smiles)
+                except:
+                    pred_smiles = prediction
+
+            if pred_mol is not None:
+                validity = 1
+                try:
+                    pred_canonical = Chem.CanonSmiles(pred_smiles)
+                except:
+                    pred_canonical = pred_smiles
+
+                if target_mol is not None:
+                    try:
+                        target_canonical = Chem.CanonSmiles(target_smiles)
+                        exact_match = int(
+                            Chem.MolToInchi(pred_mol) == Chem.MolToInchi(target_mol)
+                        )
+                        maccs_fts = DataStructs.FingerprintSimilarity(
+                            MACCSkeys.GenMACCSKeys(target_mol),
+                            MACCSkeys.GenMACCSKeys(pred_mol),
+                            metric=DataStructs.TanimotoSimilarity,
+                        )
+                        rdk_fts = DataStructs.FingerprintSimilarity(
+                            Chem.RDKFingerprint(target_mol),
+                            Chem.RDKFingerprint(pred_mol),
+                            metric=DataStructs.TanimotoSimilarity,
+                        )
+                        morgan_fts = DataStructs.TanimotoSimilarity(
+                            AllChem.GetMorganFingerprint(target_mol, 2),
+                            AllChem.GetMorganFingerprint(pred_mol, 2),
+                        )
+                        levenshtein = lev(target_canonical, pred_canonical)
+                    except:
+                        pass
+
+            RDLogger.EnableLog('rdApp.*')
+        except ImportError:
+            # rdkit 없으면 기본값으로 저장
+            pass
+
+        self.result_saver.add_molecule_generation_sample(
+            idx=sample_idx, task=task_base, label=target,
+            pred=pred_smiles,
+            validity=validity, exact_match=exact_match,
+            MACCS_FTS=maccs_fts, RDK_FTS=rdk_fts,
+            morgan_FTS=morgan_fts, levenshtein=levenshtein,
+        )
 
     def on_test_epoch_start(self) -> None:
         self.on_evaluation_epoch_start()
@@ -687,8 +881,25 @@ class Blip2Stage3(pl.LightningModule):
             "probs": [],
             "prompts": [],
             "input_mol_strings": [],
+            "idx": [],  # 샘플 인덱스 (오프라인 평가용)
+        }
+        # 오프라인 평가용 - 모든 샘플 저장
+        self.all_results = {
+            "idx": [],
+            "predictions": [],
+            "targets": [],
+            "tasks": [],
+            "probs": [],
         }
         self.debug_task_counts = {}
+
+        # 실시간 CSV 저장용 ResultSaver 초기화
+        script_name = getattr(self.args, 'filename', 'unknown')
+        self.result_saver = ResultSaver(
+            script_name=script_name,
+            base_dir=os.path.join(self.args.logging_dir, "csv_results"),
+            rank=self.global_rank,
+        )
         self.total_avg_loss = 0.0
         self.total_seen_data_size = 0
         # self.task_subtask_name_pairs = self.trainer.datamodule.dataset_split[
@@ -844,25 +1055,15 @@ class Blip2Stage3(pl.LightningModule):
             t.replace(self.blip2model.llm_tokenizer.pad_token, "") for t in targets
         ]
 
-        # Use flexible parsing for benchmark mode (Yes/No outputs from external LLMs)
-        is_benchmark = getattr(self.args, 'benchmark', False)
-        if is_benchmark:
-            # Benchmark mode: parse Yes/No text outputs
-            probs = []
-            for pred in predictions:
-                parsed_prob = parse_flexible_classification(pred)
-                if parsed_prob is not None:
-                    probs.append(parsed_prob)
-                else:
-                    # Fallback: mark as invalid
-                    probs.append([-1.0, -1.0])
-        else:
-            # Standard mode: use logit-based probability
-            probs = convert_logit2binary_prob(
-                logits=gen_logits,
-                predictions=predictions,
-                tokenizer=self.blip2model.llm_tokenizer,
-            )
+        # Use logit-based probability for both standard and benchmark modes
+        # convert_logit2binary_prob now supports:
+        # - Standard mode: finds <BOOLEAN> tag position
+        # - Benchmark mode (Galactica): finds first True/False token position
+        probs = convert_logit2binary_prob(
+            logits=gen_logits,
+            predictions=predictions,
+            tokenizer=self.blip2model.llm_tokenizer,
+        )
         prompts = [
             p.replace(self.blip2model.llm_tokenizer.pad_token, "") for p in prompts
         ]
@@ -914,10 +1115,11 @@ class Blip2Stage3(pl.LightningModule):
                 task_base = task_name.split("/")[0]
                 raw_pred = predictions[k]
 
-                # EOS 토큰 정리
+                # EOS 토큰 앞에서 자르기 (replace가 아니라 split)
                 display_pred = raw_pred
-                for eos_token in ['<|end_of_text|>', '<|endoftext|>', '[EOS]', '<eos>', '<|eot_id|>']:
-                    display_pred = display_pred.replace(eos_token, '')
+                for eos_token in ['</s>', '<|end_of_text|>', '<|endoftext|>', '[EOS]', '<eos>', '<|eot_id|>']:
+                    if eos_token in display_pred:
+                        display_pred = display_pred.split(eos_token)[0]
 
                 # PREDICTION 파싱 (평가 직전 데이터)
                 if task_base in CLASSIFICATION_BENCHMARKS:
@@ -1010,39 +1212,50 @@ class Blip2Stage3(pl.LightningModule):
 
         # ================= [수정된 전체 출력 코드 끝] =================
 
-        # Task별로 최대 10개까지만 저장하고 실시간으로 파일에 기록
+        # 배치에서 idx 가져오기 (오프라인 평가용)
+        batch_indices = batch.idx.tolist() if hasattr(batch, 'idx') else list(range(len(tasks)))
+
+        # 모든 샘플을 list_logs에 저장 및 실시간 CSV 저장
         for k in range(len(tasks)):
             task_name = tasks[k]
+            task_base = task_name.split("/")[0]
+            sample_idx = batch_indices[k] if k < len(batch_indices) else -1
 
-            # Task별 카운트 초기화
-            if task_name not in self.task_sample_counts:
-                self.task_sample_counts[task_name] = 0
-
-            # 이미 10개 저장되었으면 스킵
-            if self.task_sample_counts[task_name] >= self.max_samples_per_task:
-                continue
-
-            # 카운트 증가
-            self.task_sample_counts[task_name] += 1
-
-            # list_logs에 추가
+            # list_logs에 추가 (온라인 평가용)
             self.list_logs["predictions"].append(predictions[k])
             self.list_logs["targets"].append(targets[k])
             self.list_logs["tasks"].append(tasks[k])
             self.list_logs["probs"].append(probs[k])
             self.list_logs["prompts"].append(prompts[k])
             self.list_logs["input_mol_strings"].append(input_mol_strings[k])
+            self.list_logs["idx"].append(sample_idx)
 
-            # 실시간 저장 (배치마다 append 모드로 파일에 추가)
-            self.save_sample_realtime(
-                prediction=predictions[k],
-                target=targets[k],
-                task=tasks[k],
-                prompt=prompts[k],
-                prob=probs[k],
-                input_mol_string=input_mol_strings[k],
-                batch_idx=batch_idx,
-            )
+            # 실시간 CSV 저장 (통합 파일에 append) - metric 계산 후 저장
+            if hasattr(self, 'result_saver'):
+                self._save_sample_with_metrics(
+                    task_base=task_base,
+                    sample_idx=sample_idx,
+                    target=targets[k],
+                    prediction=predictions[k],
+                    prob=probs[k] if k < len(probs) else None,
+                )
+
+            # Task별 카운트 초기화 (디버그용 실시간 저장)
+            if task_name not in self.task_sample_counts:
+                self.task_sample_counts[task_name] = 0
+
+            # Task별 최대 10개까지만 실시간 파일 저장 (디버그용)
+            if self.task_sample_counts[task_name] < self.max_samples_per_task:
+                self.task_sample_counts[task_name] += 1
+                self.save_sample_realtime(
+                    prediction=predictions[k],
+                    target=targets[k],
+                    task=tasks[k],
+                    prompt=prompts[k],
+                    prob=probs[k],
+                    input_mol_string=input_mol_strings[k],
+                    batch_idx=batch_idx,
+                )
 
         # address forward loss
         batch_size = input_ids.shape[0]
@@ -1295,6 +1508,11 @@ class Blip2Stage3(pl.LightningModule):
             ),
         )
 
+        # ========== CSV 저장 완료 (실시간 저장됨) ==========
+        if hasattr(self, 'result_saver'):
+            self.result_saver.finalize()
+            print(f"[Rank {self.global_rank}] CSV results saved to: {self.result_saver.save_path}")
+
         self.log(
             f"{mode}/total_loss",
             self.total_avg_loss,
@@ -1440,8 +1658,15 @@ class Blip2Stage3(pl.LightningModule):
         )
 
         # evaluate classification tasks
-        # get total_cls_tensor only where total_cls_tensor[:, :2].sum(-1) > 0
-        actual_cls_tensor = uniform_cls_tensor[uniform_cls_tensor[:, :2].sum(-1) > 0]
+        # Empty slots have all zeros [0,0,0,0], parsing failures have [-1,-1,task_id,label]
+        # Use sum of all 4 columns to distinguish: empty=0, parsing failure has valid task_id/label
+        non_empty_mask = uniform_cls_tensor.sum(dim=-1) != 0
+        actual_cls_tensor = uniform_cls_tensor[non_empty_mask].clone()
+
+        # For parsing failures (prob sum < 0), set probs to [1, 0] so argmax gives pred=0
+        parsing_failure_mask = actual_cls_tensor[:, :2].sum(dim=-1) < 0
+        actual_cls_tensor[parsing_failure_mask, 0] = 1.0  # prob_negative = 1
+        actual_cls_tensor[parsing_failure_mask, 1] = -1.0  # prob_positive = -1 (for roc_auc)
 
         total_probs = actual_cls_tensor[:, :2].cpu()
         total_labels = actual_cls_tensor[:, 3].cpu().to(torch.long)

@@ -409,6 +409,7 @@ class BenchmarkLLM(nn.Module):
         num_captions=1,
         temperature=1,
         output_attentions=False,
+        prompt_texts=None,  # Not used, kept for API compatibility with LlaSMol
     ):
         """
         Generate text - pure LLM generation (no graph embeddings)
