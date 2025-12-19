@@ -3,18 +3,12 @@
 direct_data_root: null
 
 tasks:
-  # - alchemy_homo
-  # - alchemy_homo_lumo_gap
-  # - alchemy_lumo
+  
   - bace
   - aqsol-logS
   - chebi-20-mol2text
   - chebi-20-text2mol
   - forward_reaction_prediction
-  # - orderly-forward_reaction_prediction
-  # - orderly-retrosynthesis
-  # - presto-forward_reaction_prediction
-  # - presto-retrosynthesis
   - qm9_homo
   - qm9_homo_lumo_gap
   - qm9_lumo
