@@ -12,30 +12,34 @@ import selfies as sf
 import rdkit.Chem as Chem
 import re
 import copy
-from typing import Optional
 
-# Import prompt templates from prompts module
-from prompts import CHEMDFM_PROMPTS, LLASMOL_PROMPTS, DEFAULT_PROMPTS
-
-
-def selfies_to_smiles(selfies_str: str) -> Optional[str]:
-    """SELFIES → SMILES (canonicalized)"""
-    try:
-        smiles = sf.decoder(selfies_str)
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is not None:
-            return Chem.MolToSmiles(mol)
-        return smiles
-    except:
-        return None
-
-
-def extract_description_from_prompt(prompt_text: str) -> Optional[str]:
-    """Text2Mol task에서 description 추출"""
-    match = re.search(r'<DESCRIPTION>\s*(.*?)\s*</DESCRIPTION>', prompt_text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return None
+# Import from prompts module
+from prompts import (
+    # Templates
+    CHEMDFM_PROMPTS,
+    LLASMOL_PROMPTS,
+    DEFAULT_PROMPTS,
+    # Constants
+    CLASSIFICATION_BENCHMARKS,
+    REGRESSION_BENCHMARKS,
+    REACTION_BENCHMARKS,
+    TEXT2MOL_BENCHMARKS,
+    MOL2TEXT_BENCHMARKS,
+    NAME_CONVERSION_BENCHMARKS,
+    ALL_TASKS,
+    get_task_type,
+    task2id,
+    id2task,
+    # Formatter functions
+    selfies_to_smiles,
+    extract_description_from_prompt,
+    format_prompt_for_galactica,
+    format_prompt_for_llama,
+    format_prompt_for_mistral,
+    format_prompt_for_gpt,
+    format_prompt_for_llasmol,
+    format_prompt_for_chemdfm,
+)
 
 
 def extract_user_prompt_from_llada(prompt_text: str) -> str:
@@ -88,322 +92,8 @@ def extract_user_prompt_from_author(prompt_text: str) -> str:
     return prompt.strip()
 
 
-def get_task_type(task_name: str) -> str:
-    """Task 이름으로 task type 반환"""
-    task_base = task_name.split("/")[0]
-
-    if task_base in CLASSIFICATION_BENCHMARKS:
-        return "classification"
-    elif task_base in REGRESSION_BENCHMARKS:
-        return "regression"
-    elif task_base in TEXT2MOL_BENCHMARKS:
-        return "text2mol"
-    elif task_base in REACTION_BENCHMARKS:
-        return "reaction"
-    elif task_base in MOL2TEXT_BENCHMARKS:
-        return "mol2text"
-    else:
-        return "unknown"
-
-
-def format_prompt_for_galactica(prompt: str, selfies_str: str, task_name: str) -> str:
-    """
-    Format prompt for Galactica model (base model trained on scientific papers)
-    원본 프롬프트를 유지하면서 Galactica 특화 변환만 적용:
-    1. SELFIES → SMILES 변환
-    2. [START_I_SMILES]...[END_I_SMILES] 포맷 적용
-
-    Args:
-        prompt: Original prompt text
-        selfies_str: SELFIES representation of molecule
-        task_name: Task name (e.g., 'smol-property_prediction-lipo')
-
-    Returns:
-        Formatted prompt for Galactica
-    """
-    # Convert SELFIES to SMILES (canonical)
-    smiles_str = selfies_to_smiles(selfies_str)
-    if smiles_str is None:
-        try:
-            smiles_str = sf.decoder(selfies_str)
-        except:
-            smiles_str = selfies_str
-
-    # 원본 프롬프트 기반으로 Galactica 포맷 적용
-    formatted = prompt
-    galactica_mol_format = f'[START_I_SMILES]{smiles_str}[END_I_SMILES]'
-
-    # 1. <|startoftext|> 제거
-    formatted = formatted.replace('<|startoftext|>', '')
-
-    # 2. <GRAPH>...</GRAPH> 태그 제거
-    formatted = re.sub(r'<GRAPH>.*?</GRAPH>', '', formatted, flags=re.DOTALL)
-
-    # 3. <SELFIES>...</SELFIES> 태그를 Galactica SMILES 포맷으로 변환
-    # re.sub 대신 find/replace 사용 (SMILES에 \C 등 escape 문자가 있어서)
-    if '<SELFIES>' in formatted and '</SELFIES>' in formatted:
-        start_idx = formatted.find('<SELFIES>')
-        end_idx = formatted.find('</SELFIES>') + len('</SELFIES>')
-        formatted = formatted[:start_idx] + galactica_mol_format + formatted[end_idx:]
-
-    # 4. Llama3 형식 태그 제거 (내용은 유지)
-    # 순서 중요: 복합 태그를 먼저 처리한 후 단일 태그 처리
-    formatted = formatted.replace('<|start_header_id|>system<|end_header_id|>\n\n', '')
-    formatted = formatted.replace('<|start_header_id|>system<|end_header_id|>', '')
-    formatted = formatted.replace('<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n', '\n\n')
-    formatted = formatted.replace('<|eot_id|><|start_header_id|>user<|end_header_id|>', '\n\n')
-    formatted = formatted.replace('<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n', '\n')
-    formatted = formatted.replace('<|eot_id|><|start_header_id|>assistant<|end_header_id|>', '\n')
-    formatted = formatted.replace('<|eot_id|>', '')
-
-    # 5. 기존 Mistral 형식 태그 제거
-    formatted = re.sub(r'^<s>\s*', '', formatted)
-    formatted = formatted.replace('[INST]', '')
-    formatted = formatted.replace('[/INST]', '')
-
-    # 6. 태그로 감싸지지 않은 "SELFIES" 단어를 "SMILES"로 변경
-    formatted = formatted.replace('SELFIES', 'SMILES')
-
-    # 7. 공백 정리 (2개 이상 줄바꿈을 1개로)
-    formatted = re.sub(r'\n{2,}', '\n', formatted)
-    formatted = formatted.strip()
-
-    # 8. Task별 Answer hint 추가 (Galactica가 더 잘 응답하도록)
-    task_type = get_task_type(task_name)
-    if task_type == "classification":
-        # True/False로 답하도록 유도
-        formatted += "\nAnswer (True or False):"
-    elif task_type == "regression":
-        # Galactica가 논문 형식으로 생성하는 것 방지, 숫자만 답하도록 유도
-        formatted += "\nAnswer with a number only:"
-    elif task_type == "reaction":
-        # SMILES로 답하도록 명확히 지시
-        formatted += "\nAnswer with SMILES only. Product: [START_I_SMILES]"
-    elif task_type == "mol2text":
-        # Galactica가 논문 형식(Figure, Title, Abstract, [START_REF] 등)으로 생성하는 것 방지
-        formatted += "\nExplanation :"
-    elif task_type == "text2mol":
-        # SMILES로 답하도록 명확히 지시
-        formatted += "\nAnswer with SMILES only: [START_I_SMILES]"
-
-    # 마지막 trailing whitespace 제거
-    formatted = formatted.rstrip()
-
-    return formatted
-
-
-def format_prompt_for_llama(prompt: str, selfies_str: str, task_name: str) -> str:
-    """
-    Format prompt for Llama models (instruction-tuned)
-    Keeps instruction format but may adjust based on requirements
-    """
-    # For Llama, keep the original [INST]...[/INST] format
-    # Just ensure SELFIES is present (no conversion to SMILES needed)
-    return prompt
-
-
-def format_prompt_for_mistral(prompt: str, selfies_str: str, task_name: str) -> str:
-    """
-    Format prompt for Mistral models (instruction-tuned)
-    Similar to Llama format
-    """
-    return prompt
-
-
-def format_prompt_for_gpt(prompt: str, selfies_str: str, task_name: str) -> str:
-    """
-    Format prompt for GPT models (API-based)
-    May need specific formatting for API calls
-    """
-    # Remove instruction wrappers, keep clean format
-    prompt = re.sub(r'<s>\[INST\]\s*', '', prompt)
-    prompt = prompt.replace('[/INST]', '')
-    return prompt.strip()
-
-
-def format_prompt_for_llasmol(prompt: str, selfies_str: str, task_name: str) -> str:
-    """
-    Format prompt for LLaSMol model (Mistral-based instruction-tuned for chemistry)
-
-    LlaSMolGeneration internally handles:
-    - SMILES canonicalization via canonicalize_smiles_in_text()
-    - [INST]...[/INST] wrapping via GeneralPrompter
-
-    So we only need to:
-    - Convert SELFIES to SMILES
-    - Use <SMILES>...</SMILES> tags (LlaSMol format)
-    - No [INST] wrapper needed
-
-    Args:
-        prompt: Original prompt text
-        selfies_str: SELFIES representation of molecule
-        task_name: Task name (e.g., 'smol-property_prediction-lipo')
-
-    Returns:
-        Formatted prompt for LLaSMol (without [INST] wrapper, with <SMILES> tags)
-    """
-    # Convert SELFIES to SMILES (canonical)
-    smiles_str = selfies_to_smiles(selfies_str)
-    if smiles_str is None:
-        try:
-            smiles_str = sf.decoder(selfies_str)
-        except:
-            smiles_str = selfies_str
-
-    # Get task base name and type
-    task_base = task_name.split("/")[0]
-    task_type = get_task_type(task_name)
-
-    # Extract description for text2mol tasks
-    description = extract_description_from_prompt(prompt)
-
-    # Get task-specific template (use LlaSMol-specific prompts with <SMILES> tags)
-    template = LLASMOL_PROMPTS[task_base]
-
-    # Format the template
-    if "{description}" in template and description:
-        formatted = template.format(description=description)
-    elif "{smiles}" in template:
-        formatted = template.format(smiles=smiles_str)
-    else:
-        formatted = template
-
-    # Return without [INST] wrapper - LlaSMolGeneration adds it internally
-    # Note: No Query/Response wrapper needed - SMolInstruct format is just the question itself
-    return formatted
-
-
-def format_prompt_for_chemdfm(prompt: str, selfies_str: str, task_name: str) -> str:
-    """
-    Format prompt for ChemDFM model (LLaMA-based instruction-tuned for chemistry)
-    Uses ChemDFM official prompt style with task-specific templates.
-
-    ChemDFM format: <s> [Round 0]\nHuman: ...\nAssistant:
-    Reference: https://huggingface.co/OpenDFM/ChemDFM-v1.5-8B
-
-    Args:
-        prompt: Original prompt text
-        selfies_str: SELFIES representation of molecule
-        task_name: Task name (e.g., 'smol-property_prediction-lipo')
-
-    Returns:
-        Formatted prompt for ChemDFM
-    """
-    # Convert SELFIES to SMILES (canonical)
-    smiles_str = selfies_to_smiles(selfies_str)
-    if smiles_str is None:
-        try:
-            smiles_str = sf.decoder(selfies_str)
-        except:
-            smiles_str = selfies_str
-
-    # Get task base name and type
-    task_base = task_name.split("/")[0]
-    task_type = get_task_type(task_name)
-
-    # Extract description for text2mol tasks
-    description = extract_description_from_prompt(prompt)
-
-    # Get task-specific template
-    if task_base in CHEMDFM_PROMPTS:
-        template = CHEMDFM_PROMPTS[task_base]
-    else:
-        template = DEFAULT_PROMPTS.get(task_type, DEFAULT_PROMPTS["regression"])
-
-    # Format the template
-    if "{description}" in template and description:
-        formatted = template.format(description=description)
-    elif "{smiles}" in template:
-        formatted = template.format(smiles=smiles_str)
-    else:
-        formatted = template
-
-    # ChemDFM official wrapper format
-    # NOTE: <s> is added by tokenizer, so we don't include it here
-    return f"[Round 0]\nHuman: {formatted}\nAssistant:"
-
-
-CLASSIFICATION_BENCHMARKS = [
-    "smol-property_prediction-bbbp",
-    "smol-property_prediction-clintox",
-    "smol-property_prediction-hiv",
-    "smol-property_prediction-sider",
-    "bace",
-    "tox21",
-    "toxcast",
-]
-REGRESSION_BENCHMARKS = [
-    "smol-property_prediction-esol",
-    "smol-property_prediction-lipo",
-    "qm9_homo",
-    "qm9_lumo",
-    "qm9_homo_lumo_gap",
-    "qm9_dipole_moment",
-    "qm9_isotropic_polarizability",
-    "qm9_electronic_spatial_extent",
-    "qm9_zero_point_vibrational_energy",
-    "qm9_heat_capacity_298K",
-    "qm9_internal_energy_298K",
-    "qm9_enthalpy_298K",
-    "qm9_free_energy_298K",
-    "alchemy_homo",
-    "alchemy_lumo",
-    "alchemy_homo_lumo_gap",
-    "aqsol-logS",
-    "pcqm_homo_lumo_gap",
-]
-REACTION_BENCHMARKS = [
-    "forward_reaction_prediction",
-    "smol-forward_synthesis",
-    "retrosynthesis",
-    "smol-retrosynthesis",
-    "reagent_prediction",
-    "presto-forward_reaction_prediction",
-    "presto-retrosynthesis",
-    "presto-reagent_prediction",
-    "orderly-forward_reaction_prediction",
-    "orderly-retrosynthesis",
-    "orderly-reagent_prediction",
-]
-TEXT2MOL_BENCHMARKS = [
-    "chebi-20-text2mol",
-    "smol-molecule_generation",
-]
-MOL2TEXT_BENCHMARKS = [
-    "chebi-20-mol2text",
-    "smol-molecule_captioning",
-]
-NAME_CONVERSION_BENCHMARKS = [
-    "smol-name_conversion-i2s",
-    "smol-name_conversion-i2f",
-    "smol-name_conversion-s2f",
-    "smol-name_conversion-s2i",
-]
-
-
-tasks = (
-    CLASSIFICATION_BENCHMARKS
-    + REGRESSION_BENCHMARKS
-    + REACTION_BENCHMARKS
-    + TEXT2MOL_BENCHMARKS
-    + MOL2TEXT_BENCHMARKS
-    + NAME_CONVERSION_BENCHMARKS
-)
-
 input_mol_string_pattern = re.compile("<SELFIES>.*?</SELFIES>")
 graph_sequence = re.compile("<GRAPH>[<mol>]+?</GRAPH>")
-
-
-def task2id(task):
-    # task name to task id
-    task2id = {k: i for i, k in enumerate(tasks)}
-    return task2id[task]
-
-
-def id2task(task_id):
-    # task id to task name
-    id2task = {i: k for i, k in enumerate(tasks)}
-    return id2task[task_id]
 
 
 class DataCollator(DataCollatorForSeq2Seq):
@@ -519,29 +209,39 @@ class DataCollator(DataCollatorForSeq2Seq):
 
         # Apply model-specific prompt formatting for benchmark mode
         if hasattr(self.args, 'benchmark') and self.args.benchmark:
+            intrinsic_prompt = getattr(self.args, 'intrinsic_prompt', True)
+            wrapper = getattr(self.args, 'wrapper', True)
             # Detect data format based on direct_data_root path
             data_root = getattr(self.args, 'direct_data_root', '') or ''
             is_llada_data = 'GSAI-ML-LLaDA-8B-Instruct' in data_root
-
+            if not is_llada_data:
+            # Author (original) format: remove [INST] wrapper
+                prompt_text = [
+                    re.sub(r'<s>\[INST\]\s*', '', p).replace('[/INST]', '')
+                    for p in prompt_text
+                ]
             # Apply model-specific formatting
             # Use both llm_model and filename to identify the model
             model_name = self.args.llm_model.lower()
             filename = getattr(self.args, 'filename', '').lower()
 
-            # Galactica는 시스템 프롬프트 포함한 원본을 사용하므로 전처리 스킵
+            # Galactica, ChemDFM(intrinsic_prompt=False)는 시스템 프롬프트 포함한 원본을 사용하므로 전처리 스킵
             is_galactica = 'galactica' in model_name or 'galactica' in filename
+            is_chemdfm = 'chemdfm' in model_name or 'chemdfm' in filename
+            chemdfm_intrinsic = getattr(self.args, 'intrinsic_prompt', True)
+            # skip_preprocessing = is_galactica or (is_chemdfm and not chemdfm_intrinsic)
 
-            if not is_galactica:
-                # Extract user prompt based on data format (Galactica 제외)
-                if is_llada_data:
-                    # LLaDA-8B format: extract user prompt from special tokens
-                    prompt_text = [extract_user_prompt_from_llada(p) for p in prompt_text]
-                else:
-                    # Author (original) format: remove [INST] wrapper
-                    prompt_text = [
-                        re.sub(r'<s>\[INST\]\s*', '', p).replace('[/INST]', '')
-                        for p in prompt_text
-                    ]
+            # if not skip_preprocessing:
+            #     # Extract user prompt based on data format (Galactica 제외)
+            #     if is_llada_data:
+            #         # LLaDA-8B format: extract user prompt from special tokens
+            #         prompt_text = [extract_user_prompt_from_llada(p) for p in prompt_text]
+            #     else:
+            #         # Author (original) format: remove [INST] wrapper
+            #         prompt_text = [
+            #             re.sub(r'<s>\[INST\]\s*', '', p).replace('[/INST]', '')
+            #             for p in prompt_text
+            #         ]
 
             new_prompt_text = []
 
@@ -556,7 +256,7 @@ class DataCollator(DataCollatorForSeq2Seq):
                 elif is_galactica:
                     formatted_prompt = format_prompt_for_galactica(p, selfies_str, task_name)
                 elif 'chemdfm' in model_name or 'chemdfm' in filename:
-                    formatted_prompt = format_prompt_for_chemdfm(p, selfies_str, task_name)
+                    formatted_prompt = format_prompt_for_chemdfm(p, selfies_str, task_name, intrinsic_prompt=intrinsic_prompt, wrapper=wrapper)
                 elif 'llama' in model_name:
                     formatted_prompt = format_prompt_for_llama(p, selfies_str, task_name)
                 elif 'mistral' in model_name:

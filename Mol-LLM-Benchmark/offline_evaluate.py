@@ -147,6 +147,49 @@ def evaluate_regression(df: pd.DataFrame) -> Dict[str, Any]:
     return results
 
 
+def parse_smiles_from_label(label: str) -> str:
+    """label에서 SMILES 추출 (태그 제거, SELFIES는 canonical SMILES로 변환)"""
+    import re
+    try:
+        import selfies as sf
+        from rdkit import Chem
+    except ImportError:
+        sf = None
+        Chem = None
+
+    if not label:
+        return ""
+
+    label = str(label).strip()
+
+    # <SELFIES>...</SELFIES> 형식 -> canonical SMILES로 변환
+    match = re.search(r'<SELFIES>\s*(.*?)\s*</SELFIES>', label, re.DOTALL)
+    if match and sf:
+        selfies_str = match.group(1).strip()
+        try:
+            smiles = sf.decoder(selfies_str)
+            if Chem:
+                mol = Chem.MolFromSmiles(smiles)
+                if mol:
+                    return Chem.MolToSmiles(mol)  # canonical SMILES
+            return smiles
+        except:
+            return selfies_str
+
+    # <SMILES>...</SMILES> 형식
+    match = re.search(r'<SMILES>\s*(.*?)\s*</SMILES>', label, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+
+    # 태그 없이 바로 SMILES인 경우
+    # EOS 토큰 제거
+    for eos_token in ['</s>', '<|end_of_text|>', '<|endoftext|>', '<|eot_id|>']:
+        if eos_token in label:
+            label = label.split(eos_token)[0]
+
+    return label.strip()
+
+
 def evaluate_molecule_generation(df: pd.DataFrame) -> Dict[str, Any]:
     """
     Molecule Generation CSV에서 메트릭 계산
@@ -154,6 +197,7 @@ def evaluate_molecule_generation(df: pd.DataFrame) -> Dict[str, Any]:
     온라인 평가와 동일:
     - validity_ratio: 전체 샘플 중 유효한 분자 비율
     - exact_match, fingerprint sims, levenshtein: 유효한 분자만 평균
+    - text_exact_match: 텍스트 관점에서 정확히 일치하는 비율 (canonical화 없이)
 
     필요 컬럼: idx, task, label, pred, validity, exact_match, MACCS_FTS, RDK_FTS, morgan_FTS, levenshtein
     """
@@ -179,9 +223,19 @@ def evaluate_molecule_generation(df: pd.DataFrame) -> Dict[str, Any]:
             exact_match_ratio = float('nan')
             maccs_fts = rdk_fts = morgan_fts = levenshtein = float('nan')
 
+        # text_exact_match: 텍스트 관점에서 정확히 일치하는 비율 (전체 샘플 대상)
+        text_matches = 0
+        for _, row in subset.iterrows():
+            label_smiles = parse_smiles_from_label(row['label'])
+            pred_smiles = str(row['pred']).strip() if pd.notna(row['pred']) else ""
+            if label_smiles == pred_smiles:
+                text_matches += 1
+        text_exact_match_ratio = text_matches / len(subset) if len(subset) > 0 else 0
+
         results[task] = {
             'validity_ratio': validity_ratio,
             'exact_match_ratio': exact_match_ratio,
+            'text_exact_match_ratio': text_exact_match_ratio,
             'MACCS_FTS': maccs_fts,
             'RDK_FTS': rdk_fts,
             'morgan_FTS': morgan_fts,

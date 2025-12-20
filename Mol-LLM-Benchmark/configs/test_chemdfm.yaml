@@ -1,6 +1,6 @@
 defaults:
   - data: default
-  - trainer: chemdfm_8b
+  - trainer: chemdfm_1v_13B
 
 # General settings
 filename: chemdfm_test
@@ -8,16 +8,16 @@ seed: 42
 mode: test
 
 wandb_entity: jennyshin_gist_2024
-wandb_project: mol-llm-chemdfm
+wandb_project: mol-llm-chemdfm_1.0v_13b
 wandb_log_freq: 100
 wandb_id: null
-
+logging_dir: /workspace/Mol_DA/Mol-LLM-Benchmark/checkpoint/logs_HJ_intrinsic_false_with_wrapper
 debug: true
 ckpt_path: null
 pretrained_ckpt_path: null
 
 # LLM 설정 (순수 LLM만 사용)
-llm_model: OpenDFM/ChemDFM-v1.5-8B
+llm_model: OpenDFM/ChemDFM-v1.0-13B
 
 # Benchmark mode - use pure LLM without multimodal components
 benchmark: true
@@ -31,3 +31,13 @@ shuffle_graph: false
 process_disjoint: true
 
 include_failed_as_zero: true
+
+# Prompt 설정
+# intrinsic_prompt: true → ChemDFM 맞춤 프롬프트 사용 (기본값)
+# intrinsic_prompt: false → 원본 프롬프트 유지 (태그만 제거)
+intrinsic_prompt: false
+
+# Wrapper 설정
+# wrapper: true → [Round 0]\nHuman: ...\nAssistant: 형식으로 감싸기
+# wrapper: false → wrapper 없이 원본 instruction만 사용
+wrapper: true

@@ -179,24 +179,13 @@ def molecule_evaluate(
             # Parse prediction based on mode
             if flexible_parsing:
                 # Benchmark mode: flexible parsing (supports SMILES, SELFIES, etc.)
-                parsed_mol_str = parse_flexible_molecule(prediction)
-                if parsed_mol_str is None:
+                # parse_flexible_molecule returns SELFIES string
+                prediction_selfies = parse_flexible_molecule(prediction)
+                if prediction_selfies is None:
                     raise ValueError(f"Failed to parse molecule from: {prediction}")
 
-                # Determine if parsed string is SELFIES or SMILES
-                # SELFIES: consecutive bracket tokens like [C][C][O], starts with [, all chars are inside brackets
-                # SMILES: may contain brackets for special atoms like [NH2+], but also has chars outside brackets
-                # Try SMILES first (more common in LlaSMol output)
-                try:
-                    mol = Chem.MolFromSmiles(parsed_mol_str)
-                    if mol is not None:
-                        prediction_smiles = parsed_mol_str
-                    else:
-                        # Try as SELFIES
-                        prediction_smiles = selfies.decoder(parsed_mol_str)
-                except:
-                    # If SMILES parsing fails, try SELFIES
-                    prediction_smiles = selfies.decoder(parsed_mol_str)
+                # Convert SELFIES to SMILES
+                prediction_smiles = selfies.decoder(prediction_selfies)
             else:
                 # Standard mode: strict SELFIES parsing
                 if re.search(r"(?<=<SELFIES>).*?(?=</SELFIES>)", prediction) is not None:
@@ -839,103 +828,48 @@ def convert_logit2binary_prob(logits, predictions, tokenizer):
 
 def parse_flexible_molecule(text):
     """
-    Parse molecule from various output formats.
+    Parse molecule from various output formats and convert to SELFIES.
     Supports:
-    1. Mol-LLM format: <SELFIES>...</SELFIES> → returns SELFIES
-    2. LlaSMol format: <SMILES>...</SMILES> → returns SMILES
-    3. Galactica format: [START_I_SMILES]...[END_I_SMILES] → returns SMILES
-    4. Plain SMILES: CC(=O)O → returns SMILES
+    1. Mol-LLM format: <SELFIES>...</SELFIES>
+    2. Galactica format: [START_I_SMILES]...[END_I_SMILES]
+    3. Plain SMILES: CC(=O)O
 
     Returns:
-        str: SELFIES or SMILES string (caller handles conversion), or None if parsing fails
+        str: SELFIES string, or None if parsing fails
     """
+    import selfies
     from rdkit import Chem
 
     if not text:
         return None
 
-    # Remove "Answer:" prefix (common in Galactica outputs)
-    text = re.sub(r'^Answer\s*:\s*', '', text.strip(), flags=re.IGNORECASE)
-
     # Truncate at EOS token if present
-    for eos_token in ['</s>', '<|eot_id|>']:
-        if eos_token in text:
-            text = text.split(eos_token)[0]
+    if '</s>' in text:
+        text = text.split('</s>')[0]
 
-    # Store original text for tag-based extraction (tags may span multiple lines)
-    original_text = text
-
-    # Truncate at newline if molecule appears before it (for plain SMILES)
+    # Truncate at newline if molecule appears before it
     if '\n' in text:
         first_line = text.split('\n')[0].strip()
         text = first_line
 
-    # 1. Try Mol-LLM SELFIES format (search in original text for multi-line)
-    match = re.search(r'<SELFIES>\s*(.*?)\s*</SELFIES>', original_text)
+    # 1. Try Mol-LLM SELFIES format
+    match = re.search(r'<SELFIES>\s*(.*?)\s*</SELFIES>', text)
     if match:
         selfies_str = match.group(1).replace(' ', '')
-        return selfies_str  # Return SELFIES as-is
-
-    # 1b. Try LlaSMol SMILES format: <SMILES>...</SMILES> or [SMILES]...[/SMILES] (search in original text)
-    # Note: LlaSMol sometimes outputs [SMILES] instead of <SMILES>
-    # Also handle [SMILES]...</SMILES> (mixed tag format)
-    for pattern in [r'<SMILES>\s*(.*?)\s*</SMILES>', r'\[SMILES\]\s*(.*?)\s*\[/SMILES\]', r'\[SMILES\]\s*(.*?)\s*</SMILES>']:
-        match = re.search(pattern, original_text)
-        if match:
-            smiles_str = match.group(1).strip()
-            # Just validate and return SMILES (no conversion to SELFIES)
-            try:
-                mol = Chem.MolFromSmiles(smiles_str)
-                if mol is not None:
-                    return smiles_str  # Return SMILES directly
-            except:
-                pass
-
-    # 1c. Try LlaSMol format with only closing tag: ...SMILES... </SMILES>
-    # Model sometimes generates SMILES without opening tag
-    # Handle cases with multiple </SMILES> tags - try all segments between them
-    smiles_segments = re.split(r'\s*</SMILES>\s*', original_text)
-    for segment in smiles_segments:
-        segment = segment.strip()
-        if not segment:
-            continue
-        # Try the segment directly
-        try:
-            mol = Chem.MolFromSmiles(segment)
-            if mol is not None:
-                return segment
-        except:
-            pass
-        # Try extracting SMILES-like pattern from the segment
-        # SMILES typically contains: letters, numbers, parentheses, brackets, =, #, @, +, -, ., :
-        smiles_pattern = re.search(r'[A-Za-z0-9@+\-\[\]()=#\.:]+', segment)
-        if smiles_pattern:
-            potential_smiles = smiles_pattern.group()
-            try:
-                mol = Chem.MolFromSmiles(potential_smiles)
-                if mol is not None:
-                    return potential_smiles
-            except:
-                pass
-        # Try removing common prefixes like "(S)", "(C", etc.
-        for prefix_pattern in [r'^\([A-Z]\)\s*', r'^\([A-Z][^)]*\)\s*']:
-            cleaned = re.sub(prefix_pattern, '', segment)
-            if cleaned != segment:
-                try:
-                    mol = Chem.MolFromSmiles(cleaned)
-                    if mol is not None:
-                        return cleaned
-                except:
-                    pass
+        return selfies_str
 
     # 2. Try Galactica SMILES format: [START_I_SMILES]...[END_I_SMILES]
     match = re.search(r'\[START_I_SMILES\](.*?)\[END_I_SMILES\]', text)
     if match:
         smiles_str = match.group(1).strip()
         try:
+            # Validate SMILES
             mol = Chem.MolFromSmiles(smiles_str)
             if mol is not None:
-                return smiles_str  # Return SMILES directly
+                # Convert to canonical SMILES first, then to SELFIES
+                canonical_smiles = Chem.CanonSmiles(smiles_str)
+                selfies_str = selfies.encoder(canonical_smiles)
+                return selfies_str
         except:
             pass
 
@@ -947,19 +881,23 @@ def parse_flexible_molecule(text):
         try:
             mol = Chem.MolFromSmiles(smiles_str)
             if mol is not None:
-                return smiles_str  # Return SMILES directly
+                canonical_smiles = Chem.CanonSmiles(smiles_str)
+                selfies_str = selfies.encoder(canonical_smiles)
+                return selfies_str
         except:
             pass
 
     # 3. Try plain SMILES (heuristic: contains typical SMILES characters)
-    # Look for patterns like: C, CC, C(=O)O, c1ccccc1, etc.
-    match = re.search(r'[A-Z][a-zA-Z0-9@+\-\[\]()=#\.]+', text)
+    # Look for patterns like: C, CC, C(=O)O, c1ccccc1, CC/C=C\C (stereochemistry)
+    match = re.search(r'[A-Z][a-zA-Z0-9@+\-\[\]()=#\.\/\\]+', text)
     if match:
         potential_smiles = match.group()
         try:
             mol = Chem.MolFromSmiles(potential_smiles)
             if mol is not None:
-                return potential_smiles  # Return SMILES directly
+                canonical_smiles = Chem.CanonSmiles(potential_smiles)
+                selfies_str = selfies.encoder(canonical_smiles)
+                return selfies_str
         except:
             pass
 
