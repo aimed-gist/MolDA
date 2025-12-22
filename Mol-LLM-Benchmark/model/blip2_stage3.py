@@ -5,7 +5,7 @@ from model.blip2_opt import Blip2OPT
 from model.blip2_llama import Blip2Llama
 from model.blip2_mistral import Blip2Mistral
 from model.blip2_t5 import Blip2T5
-from model.Benchmark_model import BenchmarkLLM, LlaSMolBenchmarkLLM, ThreeDMoLMBenchmarkLLM
+from model.Benchmark_model import BenchmarkLLM, LlaSMolBenchmarkLLM
 import pytorch_lightning as pl
 from torch import optim
 from model.scheduler import LinearWarmupCosineLRScheduler, LinearWarmupStepLRScheduler
@@ -383,7 +383,7 @@ class Blip2Stage3(pl.LightningModule):
                 label_val = None
 
             # Parse prediction
-            pred_val = parse_flexible_number(prediction)
+            pred_val = parse_flexible_number(prediction, task_name=task_base)
 
             if pred_val is not None and label_val is not None:
                 error = pred_val - label_val
@@ -900,6 +900,9 @@ class Blip2Stage3(pl.LightningModule):
             base_dir=os.path.join(self.args.logging_dir, "csv_results"),
             rank=self.global_rank,
         )
+        # Config 저장 (rank 0에서만)
+        self.result_saver.save_config(self.args)
+
         self.total_avg_loss = 0.0
         self.total_seen_data_size = 0
         # self.task_subtask_name_pairs = self.trainer.datamodule.dataset_split[
@@ -975,6 +978,10 @@ class Blip2Stage3(pl.LightningModule):
         if is_llasmol and "prompt_text" in batch:
             prompt_texts = batch["prompt_text"]
 
+        # Read return_scores from config (for ROC-AUC logits extraction)
+        # Set return_scores=true in config when running classification benchmarks
+        return_scores = getattr(self.args, 'return_scores', False)
+
         gen_outputs = self.blip2model.generate(
             graphs=(graphs, additional_graphs),
             input_ids=batch.prompt_input_ids,
@@ -985,6 +992,7 @@ class Blip2Stage3(pl.LightningModule):
             min_length=self.min_len,
             output_attentions=self.args.log_attn_score,
             prompt_texts=prompt_texts,
+            return_scores=return_scores,
         )
         gen_logits = gen_outputs.logits
         gen_labels = batch.gen_labels
@@ -1059,11 +1067,15 @@ class Blip2Stage3(pl.LightningModule):
         # convert_logit2binary_prob now supports:
         # - Standard mode: finds <BOOLEAN> tag position
         # - Benchmark mode (Galactica): finds first True/False token position
-        probs = convert_logit2binary_prob(
-            logits=gen_logits,
-            predictions=predictions,
-            tokenizer=self.blip2model.llm_tokenizer,
-        )
+        # Only compute when return_scores=True (classification benchmarks)
+        if return_scores and gen_logits is not None and gen_logits.numel() > 0:
+            probs = convert_logit2binary_prob(
+                logits=gen_logits,
+                predictions=predictions,
+                tokenizer=self.blip2model.llm_tokenizer,
+            )
+        else:
+            probs = None
         prompts = [
             p.replace(self.blip2model.llm_tokenizer.pad_token, "") for p in prompts
         ]
@@ -1136,7 +1148,7 @@ class Blip2Stage3(pl.LightningModule):
                         parsed = parse_flexible_classification(raw_pred)
                         parsed_pred = ("True" if parsed[1] > parsed[0] else "False") if parsed else "PARSE FAILED"
                 elif task_base in REGRESSION_BENCHMARKS:
-                    parsed = parse_flexible_number(raw_pred)
+                    parsed = parse_flexible_number(raw_pred, task_name=task_base)
                     parsed_pred = str(parsed) if parsed is not None else "PARSE FAILED"
                 elif task_base in MOL2TEXT_BENCHMARKS:
                     parsed = parse_flexible_caption(raw_pred)
@@ -1191,7 +1203,7 @@ class Blip2Stage3(pl.LightningModule):
 [INPUT PROMPT]
 {clean_prompt}
 
-[TARGET (SMILES)]
+[TARGET]
 {target_display}
 
 [RAW PREDICTION]
@@ -1225,7 +1237,7 @@ class Blip2Stage3(pl.LightningModule):
             self.list_logs["predictions"].append(predictions[k])
             self.list_logs["targets"].append(targets[k])
             self.list_logs["tasks"].append(tasks[k])
-            self.list_logs["probs"].append(probs[k])
+            self.list_logs["probs"].append(probs[k] if probs is not None else None)
             self.list_logs["prompts"].append(prompts[k])
             self.list_logs["input_mol_strings"].append(input_mol_strings[k])
             self.list_logs["idx"].append(sample_idx)
@@ -1237,7 +1249,7 @@ class Blip2Stage3(pl.LightningModule):
                     sample_idx=sample_idx,
                     target=targets[k],
                     prediction=predictions[k],
-                    prob=probs[k] if k < len(probs) else None,
+                    prob=probs[k] if probs is not None and k < len(probs) else None,
                 )
 
             # Task별 카운트 초기화 (디버그용 실시간 저장)
@@ -1252,7 +1264,7 @@ class Blip2Stage3(pl.LightningModule):
                     target=targets[k],
                     task=tasks[k],
                     prompt=prompts[k],
-                    prob=probs[k],
+                    prob=probs[k] if probs is not None else None,
                     input_mol_string=input_mol_strings[k],
                     batch_idx=batch_idx,
                 )
@@ -1547,6 +1559,9 @@ class Blip2Stage3(pl.LightningModule):
             task_subtask_pair = self.list_logs["tasks"][i]
             if task_subtask_pair in self.cls_task_subtask_name_pair_dict.keys():
                 probs = self.list_logs["probs"][i]
+                # Skip if probs is None (return_scores=False)
+                if probs is None:
+                    continue
                 label = int(
                     "True" in self.list_logs["targets"][i]
                     or "true" in self.list_logs["targets"][i]

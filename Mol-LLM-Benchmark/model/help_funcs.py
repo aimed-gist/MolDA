@@ -480,6 +480,7 @@ def per_device_evaluate(
                 prompts=task_prompts,
                 input_mol_strings=task_input_mol_strings,
                 flexible_parsing=flexible_parsing,
+                task_name=task_name,
             )
             # 변환된 predictions로 업데이트
             task_specific_predictions[t] = _converted_predictions
@@ -789,6 +790,7 @@ def convert_logit2binary_prob(logits, predictions, tokenizer):
                 else:
                     use_true_false_pair[idx] = True
                 found_position = True
+                print(f"Found standalone word '{matched_word}' in prediction: {pred}")
 
         if not found_position:
             prediction_position_ids[idx, 0] = True
@@ -889,7 +891,9 @@ def parse_flexible_molecule(text):
 
     # 3. Try plain SMILES (heuristic: contains typical SMILES characters)
     # Look for patterns like: C, CC, C(=O)O, c1ccccc1, CC/C=C\C (stereochemistry)
-    match = re.search(r'[A-Z][a-zA-Z0-9@+\-\[\]()=#\.\/\\]+', text)
+    # Also handle SMILES starting with [ like [NH3+], [C@H], etc.
+    # Pattern: starts with uppercase letter OR [ followed by typical SMILES characters
+    match = re.search(r'(?:\[[^\]]+\]|[A-Z])[a-zA-Z0-9@+\-\[\]()=#\.\/\\]*', text)
     if match:
         potential_smiles = match.group()
         try:
@@ -900,6 +904,17 @@ def parse_flexible_molecule(text):
                 return selfies_str
         except:
             pass
+
+    # 4. Try the entire text as SMILES (last resort)
+    text_stripped = text.strip()
+    try:
+        mol = Chem.MolFromSmiles(text_stripped)
+        if mol is not None:
+            canonical_smiles = Chem.CanonSmiles(text_stripped)
+            selfies_str = selfies.encoder(canonical_smiles)
+            return selfies_str
+    except:
+        pass
 
     return None
 
@@ -958,7 +973,7 @@ def parse_flexible_caption(text):
     return text
 
 
-def parse_flexible_number(text):
+def parse_flexible_number(text, task_name=None):
     """
     Parse numerical value from various output formats.
     Supports:
@@ -969,9 +984,16 @@ def parse_flexible_number(text):
     5. Number with trailing garbage: "-3.09 COc1ccc(OC)cc1" → -3.09
     6. Number with brackets: "4.2 [5]_" → 4.2
 
+    Args:
+        text: Text to parse
+        task_name: Optional task name for unit validation (e.g., 'qm9_homo' expects Hartree)
+
     Returns:
         float: Parsed number, or None if parsing fails
     """
+    # Tasks that require Hartree units (eV is wrong)
+    HARTREE_TASKS = {'qm9_homo', 'qm9_lumo', 'qm9_homo_lumo_gap',
+                     'alchemy_homo', 'alchemy_lumo', 'alchemy_homo_lumo_gap'}
     if not text:
         return None
 
@@ -1010,7 +1032,31 @@ def parse_flexible_number(text):
         except:
             pass
 
-    # 2. Try to extract number at the START of the text (most common case for benchmarks)
+    # 2. Check for energy units based on task type (BEFORE extracting plain numbers)
+    # For Hartree tasks (qm9_homo, etc.), eV is wrong unit - treat as parse failure
+    if task_name and task_name in HARTREE_TASKS:
+        ev_match = re.search(r'[-+]?\d+\.?\d*\s*eV\b', text, re.IGNORECASE)
+        if ev_match:
+            # eV unit found - wrong unit for HOMO/LUMO (should be Hartree), treat as failure
+            return None
+
+    # 3. Accept Hartree units (extract number)
+    hartree_match = re.search(r'([-+]?\d+\.?\d*)\s*(?:Hartree|hartree|Ha|a\.u\.|au|H)\b', text)
+    if hartree_match:
+        try:
+            return float(hartree_match.group(1))
+        except:
+            pass
+
+    # 4. Accept eV units for non-Hartree tasks (extract number)
+    ev_match = re.search(r'([-+]?\d+\.?\d*)\s*eV\b', text, re.IGNORECASE)
+    if ev_match:
+        try:
+            return float(ev_match.group(1))
+        except:
+            pass
+
+    # 5. Try to extract number at the START of the text (most common case for benchmarks)
     # This handles cases like: "-3.09 COc1ccc(OC)cc1", "4.2 [5]_", "-2.4 (comment)"
     text_stripped = text.strip()
     match = re.match(r'^([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)', text_stripped)
@@ -1020,9 +1066,19 @@ def parse_flexible_number(text):
         except:
             pass
 
-    # 3. Try plain number anywhere (including scientific notation)
+    # 6. Try to extract number after common keywords (avoiding SMILES which contain numbers)
+    # Keywords: "is", "be", "approximately", "about", "around", "value", "energy", "="
+    keyword_match = re.search(r'(?:is|be|approximately|about|around|value|energy|=)\s*([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)', text, re.IGNORECASE)
+    if keyword_match:
+        try:
+            return float(keyword_match.group(1))
+        except:
+            pass
+
+    # 7. Try plain number anywhere (including scientific notation) - last resort
     # Match: -0.24, +0.24, 0.24, 1e-5, -1.5e+3, etc.
-    match = re.search(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', text)
+    # But avoid SMILES patterns by looking for standalone numbers
+    match = re.search(r'(?<![a-zA-Z\(\)\[\]])[-+]?\d+\.?\d*(?:[eE][-+]?\d+)?(?![a-zA-Z\(\)\[\]])', text)
     if match:
         try:
             return float(match.group())
@@ -1032,7 +1088,7 @@ def parse_flexible_number(text):
     return None
 
 
-def regression_evaluate(predictions, targets, prompts, input_mol_strings, flexible_parsing=False):
+def regression_evaluate(predictions, targets, prompts, input_mol_strings, flexible_parsing=False, task_name=None):
 
     total_labels = []
     total_predictions = []
@@ -1051,7 +1107,7 @@ def regression_evaluate(predictions, targets, prompts, input_mol_strings, flexib
         # Parse prediction based on mode
         if flexible_parsing:
             # Benchmark mode: flexible parsing for various output formats
-            prediction = parse_flexible_number(predictions[i])
+            prediction = parse_flexible_number(predictions[i], task_name=task_name)
             if prediction is not None:
                 total_labels.append(label)
                 total_predictions.append(prediction)

@@ -86,7 +86,7 @@ class LlaSMolGeneration(object):
         
         return sample
     
-    def _generate(self, input_ids, attention_mask=None, max_new_tokens=1024, **generation_settings):
+    def _generate(self, input_ids, attention_mask=None, max_new_tokens=1024, return_scores=False, **generation_settings):
         generation_config = GenerationConfig(
             pad_token_id=self.model.config.pad_token_id,
             bos_token_id=self.model.config.bos_token_id,
@@ -105,7 +105,7 @@ class LlaSMolGeneration(object):
                 attention_mask=attention_mask,
                 generation_config=generation_config,
                 return_dict_in_generate=True,
-                output_scores=True,
+                output_scores=return_scores,  # Only compute scores for classification tasks
                 max_new_tokens=max_new_tokens,
             )
         s = generation_output.sequences
@@ -115,9 +115,19 @@ class LlaSMolGeneration(object):
             text = self.prompter.get_response(output_item)
             output_text.append(text)
 
-        return output_text, output
+        # Extract all scores for ROC-AUC calculation (only when return_scores=True)
+        # LlaSMol outputs "<BOOLEAN> Yes/No </BOOLEAN>", so we need all scores
+        # to find the correct position where Yes/No token is generated
+        all_scores = None
+        if return_scores and hasattr(generation_output, 'scores') and generation_output.scores:
+            # Stack all scores: tuple of (batch, vocab) -> (seq_len, batch, vocab)
+            all_scores = torch.stack(generation_output.scores, dim=0)  # (seq_len, batch, vocab)
+            # Transpose to (batch, seq_len, vocab) for easier processing
+            all_scores = all_scores.transpose(0, 1)  # (batch, seq_len, vocab)
 
-    def generate(self, input_text, batch_size=1, max_input_tokens=512, max_new_tokens=1024, canonicalize_smiles=True, print_out=False, **generation_settings):
+        return output_text, output, all_scores
+
+    def generate(self, input_text, batch_size=1, max_input_tokens=512, max_new_tokens=1024, canonicalize_smiles=True, print_out=False, return_scores=False, **generation_settings):
         if isinstance(input_text, str):
             input_text = [input_text]
         else:
@@ -149,6 +159,7 @@ class LlaSMolGeneration(object):
                 original_index[bidx] = ('b', len(batch_samples))
                 batch_samples.append(sample)
 
+            batch_all_logits = None
             if len(batch_samples) > 0:
                 batch_input = {'input_ids': [sample['input_ids'] for sample in batch_samples]}
                 batch_input = self.tokenizer.pad(
@@ -158,7 +169,7 @@ class LlaSMolGeneration(object):
                 )
                 input_ids = batch_input['input_ids'].to(self.device)
                 attention_mask = batch_input['attention_mask'].to(self.device)
-                batch_output_text, _ = self._generate(input_ids, attention_mask=attention_mask, max_new_tokens=max_new_tokens, **generation_settings)
+                batch_output_text, _, batch_all_logits = self._generate(input_ids, attention_mask=attention_mask, max_new_tokens=max_new_tokens, return_scores=return_scores, **generation_settings)
                 num_batch_samples = len(batch_samples)
                 ko = 0
                 num_return_sequences = 1 if 'num_return_sequences' not in generation_settings else generation_settings['num_return_sequences']
@@ -171,39 +182,48 @@ class LlaSMolGeneration(object):
                 
             new_batch_samples = []
             new_batch_outputs = []
+            new_batch_logits = []
 
             for bidx in sorted(original_index.keys()):
                 place, widx = original_index[bidx]
                 if place == 'b':
                     sample = batch_samples[widx]
                     output = batch_outputs[widx]
+                    # Get corresponding logits for this sample: (seq_len, vocab)
+                    if batch_all_logits is not None:
+                        sample_logits = batch_all_logits[widx]  # (seq_len, vocab)
+                    else:
+                        sample_logits = None
                 elif place == 's':
                     sample = skipped_samples[widx]
                     output = None
+                    sample_logits = None
                 else:
                     raise ValueError(place)
                 new_batch_samples.append(sample)
                 new_batch_outputs.append(output)
+                new_batch_logits.append(sample_logits)
 
             batch_samples = new_batch_samples
             batch_outputs = new_batch_outputs
 
             assert len(batch_samples) == len(batch_outputs)
-            for sample, sample_outputs in zip(batch_samples, batch_outputs):
+            for idx, (sample, sample_outputs) in enumerate(zip(batch_samples, batch_outputs)):
                 if print_out:
                     print('=============')
                     print('Input: %s' % sample['input_text'])
                     if sample_outputs is None:
                         print('Output: None (Because the input text exceeds the token limit (%d) )' % max_input_tokens)
                     else:
-                        for idx, output_text in enumerate(sample_outputs, start=1):
-                            print('Output %d: %s' % (idx, output_text))
+                        for oidx, output_text in enumerate(sample_outputs, start=1):
+                            print('Output %d: %s' % (oidx, output_text))
                     print('\n')
 
                 log = {
-                    'input_text': sample['input_text'], 
+                    'input_text': sample['input_text'],
                     'real_input_text': sample['real_input_text'],
                     'output': sample_outputs,
+                    'all_logits': new_batch_logits[idx],  # (seq_len, vocab) for Yes/No position finding
                 }
 
                 all_outputs.append(log)

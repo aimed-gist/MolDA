@@ -110,6 +110,7 @@ class LlaSMolBenchmarkLLM(nn.Module):
         temperature=1,
         output_attentions=False,
         prompt_texts=None,  # Raw prompt texts for LlaSMol generation
+        return_scores=False,  # Only True for classification tasks (ROC-AUC)
     ):
         """
         Generate text using official LlaSMol generation code.
@@ -133,16 +134,20 @@ class LlaSMolBenchmarkLLM(nn.Module):
                 batch_size=len(prompt_texts),
                 max_new_tokens=max_length,
                 canonicalize_smiles=False,
+                return_scores=return_scores,  # Only for classification tasks
                 **generation_settings,
             )
 
-            # Extract predictions
+            # Extract predictions and all_logits
             predictions = []
+            all_logits_list = []
             for result in results:
                 if result['output'] is not None:
                     predictions.append(result['output'][0] if result['output'] else "")
                 else:
                     predictions.append("")
+                # Collect all_logits (seq_len, vocab) for each sample
+                all_logits_list.append(result.get('all_logits'))
 
             # Create output object compatible with blip2_stage3
             class GenerateOutput:
@@ -150,8 +155,28 @@ class LlaSMolBenchmarkLLM(nn.Module):
             outputs = GenerateOutput()
             outputs.predictions = predictions
             outputs.sequences = None
-            outputs.logits = None
             outputs.attentions = None
+
+            # Construct logits tensor from all_logits: (batch, seq_len, vocab_size)
+            # For classification ROC-AUC, convert_logit2binary_prob finds <BOOLEAN> position
+            valid_logits = [l for l in all_logits_list if l is not None]
+            if valid_logits:
+                # Pad sequences to same length and stack
+                max_seq_len = max(l.shape[0] for l in valid_logits)
+                vocab_size = valid_logits[0].shape[1]
+                device = valid_logits[0].device
+
+                padded_logits = []
+                for l in valid_logits:
+                    if l.shape[0] < max_seq_len:
+                        # Pad with zeros
+                        padding = torch.zeros(max_seq_len - l.shape[0], vocab_size, device=device, dtype=l.dtype)
+                        l = torch.cat([l, padding], dim=0)
+                    padded_logits.append(l)
+
+                outputs.logits = torch.stack(padded_logits, dim=0)  # (batch, seq_len, vocab_size)
+            else:
+                outputs.logits = None
 
             return outputs
 
@@ -410,6 +435,7 @@ class BenchmarkLLM(nn.Module):
         temperature=1,
         output_attentions=False,
         prompt_texts=None,  # Not used, kept for API compatibility with LlaSMol
+        return_scores=False,  # Not used, kept for API compatibility with LlaSMol
     ):
         """
         Generate text - pure LLM generation (no graph embeddings)
@@ -425,6 +451,7 @@ class BenchmarkLLM(nn.Module):
             generation outputs with predictions
         """
         # Pure LLM generation (no graph embeddings injection)
+        # output_scores: True for classification tasks (ROC-AUC), False otherwise for efficiency
         outputs = self.llm_model.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -438,7 +465,7 @@ class BenchmarkLLM(nn.Module):
             repetition_penalty=repetition_penalty,
             length_penalty=length_penalty,
             num_return_sequences=num_captions,
-            output_scores=True,
+            output_scores=return_scores,
             return_dict_in_generate=True,
             output_attentions=output_attentions,
         )
