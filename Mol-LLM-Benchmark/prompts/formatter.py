@@ -236,14 +236,17 @@ class PromptFormatter:
         # 4. "SELFIES" → "SMILES"
         formatted = formatted.replace('SELFIES', 'SMILES')
 
-        # 5. 공백 정리
+        # 5. <DESCRIPTION>...</DESCRIPTION> 태그 제거 (내용은 유지)
+        formatted = re.sub(r'<DESCRIPTION>(.*?)</DESCRIPTION>', r'\1', formatted, flags=re.DOTALL)
+
+        # 6. 공백 정리
         formatted = re.sub(r'\n{2,}', '\n', formatted)
         formatted = formatted.strip()
 
-        # 8. Task별 Answer hint 추가
+        # 7. Task별 Answer hint 추가
         task_type = get_task_type(task_name)
         if task_type == "classification":
-            formatted += "\nAnswer (True or False):"
+            formatted += "\nAnswer with True or False only:"
         elif task_type == "regression":
             formatted += "\nAnswer with a number only:"
         elif task_type == "reaction":
@@ -336,7 +339,7 @@ class PromptFormatter:
         # ChemDFM wrapper
         return f"[Round 0]\nHuman: {formatted}\nAssistant:"
 
-    def _format_chemdfm_passthrough(self, prompt: str, selfies_str: str, task_name: str, wrapper: bool = False) -> str:
+    def _format_chemdfm_passthrough(self, prompt: str, selfies_str: str, task_name: str) -> str:
         """
         ChemDFM 모델용 - Passthrough 모드
         - 원본 프롬프트를 최대한 유지하면서 불필요한 태그만 제거
@@ -388,14 +391,124 @@ class PromptFormatter:
 
         # 10. 공백 정리
         formatted = clean_whitespace(formatted)
+        
+        # 특정 task에 단서 조항 달기
+        task_base = task_name.split("/")[0]
+        task_type = get_task_type(task_name)
+        if task_name == "bace":
+            formatted += "\npredict whether it can inhibit (True) the Beta-site Amyloid Precursor Protein Cleaving Enzyme 1 (BACE1) or cannot inhibit (False). Answer with only True or False."
+        elif task_name == "smol-property_prediction-bbbp":
+            formatted += "\npredict whether it can penetrate (True) the blood-brain barrier or not (False). Answer with only True or False."
+        elif task_name == "smol-property_prediction-clintox":
+            formatted += "\npredict whether it is toxic (True) to humans or not (False). Answer with only True or False."
+        elif task_name == "smol-property_prediction-hiv":
+            formatted += "\npredict whether it is active (True) against HIV or not (False). Answer with only True or False."
+        elif task_name == "smol-property_prediction-sider":
+            formatted += "\npredict whether it has side effects (True) or not (False). Answer with only True or False."
+        elif task_type == "reaction":
+            formatted += "\n Answer with SMILES only."
+        elif task_type =="regression":
+            if task_name == "qm9_homo":
+                formatted += "\n your task is to predict quantum mechanical properties of molecules. Please strictly follow the format, no other information can be provided. Given the SMILES string of a molecule, predict the HOMO energy in Hartree units.  Answer with only the numerical value. HOMO (Hartree)"
+            elif task_name == "qm9_lumo":
+                formatted += "\n your task is to predict quantum mechanical properties of molecules. Please strictly follow the format, no other information can be provided. Given the SMILES string of a molecule, predict the LUMO energy in Hartree units.  Answer with only the numerical value. LUMO (Hartree)"
+            elif task_name =="qm9_homo_lumo_gap":
+                formatted += "\n your task is to predict quantum mechanical properties of molecules. Please strictly follow the format, no other information can be provided. Given the SMILES string of a molecule, predict the HOMO-LUMO gap energy in Hartree units.  Answer with only the numerical value. HOMO-LUMO gap (Hartree)"
+            else:
+                formatted += "\n Answer with a number only"
+        # # wrapper 옵션에 따라 ChemDFM wrapper 적용
+        # if wrapper:
+        #     return f"[Round 0]\nHuman: {formatted}\nAssistant:"
+        # else:
+        #     return formatted
+        return f"[Round 0]\nHuman: {formatted}\nAssistant:"
 
-        # wrapper 옵션에 따라 ChemDFM wrapper 적용
-        if wrapper:
-            return f"[Round 0]\nHuman: {formatted}\nAssistant:"
-        else:
-            return formatted
     def _format_llasmol_passthrough(self, prompt: str, selfies_str: str, task_name: str, wrapper: bool = False) -> str:
+        """
+        LLaSMol 모델용 - Passthrough 모드
+        - 원본 프롬프트를 최대한 유지하면서 불필요한 태그만 제거
+        - SELFIES → SMILES 변환
 
+        변환 규칙:
+        - <|startoftext|> 제거
+        - <|start_header_id|>system<|end_header_id|> → 제거 (시스템 프롬프트 내용은 유지)
+        - <|eot_id|><|start_header_id|>user<|end_header_id|> → 줄바꿈으로 대체
+        - <SELFIES>...</SELFIES> → SMILES로 변환 
+        - <SMILES>...</SMILES> 태그 사용
+        - <GRAPH>...</GRAPH> → 내용 포함 전체 제거
+        - <|eot_id|><|start_header_id|>assistant<|end_header_id|> → 제거
+        - "SELFIES" 텍스트 → "SMILES"로 변환
+                - SELFIES → SMILES 변환
+        - [INST] wrapper는 LlaSMolGeneration이 내부적으로 처리
+
+        Args:
+            wrapper: LlaSMolGeneration이 내부 처리 
+        """
+        formatted = prompt
+
+        # 1. <|startoftext|> 제거
+        formatted = formatted.replace('<|startoftext|>', '')
+
+        # 2. <|start_header_id|>system<|end_header_id|> 제거 (시스템 프롬프트 내용은 유지)
+        formatted = formatted.replace('<|start_header_id|>system<|end_header_id|>\n\n', '')
+        formatted = formatted.replace('<|start_header_id|>system<|end_header_id|>', '')
+
+        # 3. <|eot_id|><|start_header_id|>user<|end_header_id|> → 줄바꿈으로 대체
+        formatted = formatted.replace('<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n', '\n\n')
+        formatted = formatted.replace('<|eot_id|><|start_header_id|>user<|end_header_id|>', '\n\n')
+
+        # 4. <SELFIES>...</SELFIES> → <SMILES>...</SMILES>로 변환
+        formatted = convert_all_selfies_tags(
+            formatted,
+            converter_func=lambda smiles: f'<SMILES>{smiles}</SMILES>'
+        )
+
+        # 5. <GRAPH>...</GRAPH> 내용 포함 전체 제거
+        formatted = remove_graph_tags(formatted)
+
+        # 6. <|eot_id|><|start_header_id|>assistant<|end_header_id|> 제거
+        formatted = formatted.replace('<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n', '')
+        formatted = formatted.replace('<|eot_id|><|start_header_id|>assistant<|end_header_id|>', '')
+
+        # 7. 남은 <|eot_id|> 제거
+        formatted = formatted.replace('<|eot_id|>', '')
+
+        # 8. "SELFIES" 텍스트 → "SMILES"로 변환
+        formatted = formatted.replace('SELFIES', 'SMILES')
+
+        # 9. <DESCRIPTION>...</DESCRIPTION> 태그 제거 (내용은 유지)
+        formatted = re.sub(r'<DESCRIPTION>(.*?)</DESCRIPTION>', r'\1', formatted, flags=re.DOTALL)
+
+        # 10. 공백 정리
+        formatted = clean_whitespace(formatted)
+        
+        # 특정 task에 단서 조항 달기
+        task_base = task_name.split("/")[0]
+        task_type = get_task_type(task_name)
+        if task_name == "bace":
+            formatted += "\npredict whether it can inhibit (True) the Beta-site Amyloid Precursor Protein Cleaving Enzyme 1 (BACE1) or cannot inhibit (False). Please answer with only True or False."
+        elif task_name == "smol-property_prediction-bbbp":
+            formatted += "\n predict whether it can penetrate (True) the blood-brain barrier or not (False). Please answer with only True or False."
+        elif task_name == "smol-property_prediction-clintox":
+            formatted += "\n predict whether it is toxic (True) to humans or not (False). Please answer with only True or False."
+        elif task_name == "smol-property_prediction-hiv":
+            formatted += "\n predict whether it is active (True) against HIV or not (False). Please answer with only True or False."
+        elif task_name == "smol-property_prediction-sider":
+            formatted += "\n predict whether it has side effects (True) or not (False). Please answer with only True or False."
+        elif task_type == "reaction":
+            formatted += "\n Answer with SMILES only."
+        elif task_type =="regression":
+            if task_name == "qm9_homo":
+                formatted += "\n your task is to predict quantum mechanical properties of molecules. Please strictly follow the format, no other information can be provided. Given the SMILES string of a molecule, predict the HOMO energy in Hartree units.  Answer with only the numerical value. HOMO (Hartree)"
+            elif task_name == "qm9_lumo":
+                formatted += "\n your task is to predict quantum mechanical properties of molecules. Please strictly follow the format, no other information can be provided. Given the SMILES string of a molecule, predict the LUMO energy in Hartree units.  Answer with only the numerical value. LUMO (Hartree)"
+            elif task_name =="qm9_homo_lumo_gap":
+                formatted += "\n your task is to predict quantum mechanical properties of molecules. Please strictly follow the format, no other information can be provided. Given the SMILES string of a molecule, predict the HOMO-LUMO gap energy in Hartree units.  Answer with only the numerical value. HOMO-LUMO gap (Hartree)"
+            else:
+                formatted += "\n Answer with a number only"
+        # wrapper는 처리 클래스 내에 내장되어 있어서 제거함. 
+
+        return formatted
 
         return None
 
@@ -421,16 +534,16 @@ def format_prompt_for_gpt(prompt: str, selfies_str: str, task_name: str) -> str:
     return PromptFormatter("gpt").format(prompt, selfies_str, task_name)
 
 
-def format_prompt_for_llasmol(prompt: str, selfies_str: str, task_name: str) -> str:
+def format_prompt_for_llasmol(prompt: str, selfies_str: str,task_name: str,intrinsic_prompt: bool = True) -> str:
     """LlaSMol용 프롬프트 포맷팅 (호환성 유지)"""
     formatter = PromptFormatter("llasmol")
     if intrinsic_prompt:
         return formatter._format_llasmol(prompt, selfies_str, task_name)
     else:
-        return formatter._format_llasmol_passthrough(prompt, selfies_str, task_name, wrapper=wrapper)
+        return formatter._format_llasmol_passthrough(prompt, selfies_str, task_name)
 
 
-def format_prompt_for_chemdfm(prompt: str, selfies_str: str, task_name: str, intrinsic_prompt: bool = True, wrapper: bool = True) -> str:
+def format_prompt_for_chemdfm(prompt: str, selfies_str: str, task_name: str, intrinsic_prompt: bool = True) -> str:
     """
     ChemDFM용 프롬프트 포맷팅
 
@@ -442,13 +555,128 @@ def format_prompt_for_chemdfm(prompt: str, selfies_str: str, task_name: str, int
         wrapper: True면 [Round 0]\nHuman: ...\nAssistant: 형식으로 감싸기 (intrinsic_prompt=False일 때만 적용)
     """
     formatter = PromptFormatter("chemdfm")
-    if intrinsic_prompt:
+    if intrinsic_prompt or task_name.startswith("qm9_"):
         return formatter._format_chemdfm(prompt, selfies_str, task_name)
     else:
-        return formatter._format_chemdfm_passthrough(prompt, selfies_str, task_name, wrapper=wrapper)
+        return formatter._format_chemdfm_passthrough(prompt, selfies_str, task_name)
 
 
 # ============ Test Cases ============
+
+# Galactica Test Cases
+GALACTICA_TEST_CASES = [
+    # BACE Classification
+    {
+        "task": "bace",
+        "raw_prompt": """<|startoftext|><|start_header_id|>system<|end_header_id|>
+
+You are a helpful assistant for molecular chemistry, to address tasks including molecular property classification, molecular property regression, chemical reaction prediction, molecule captioning, molecule generation.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Predict the biological activity of the molecule <SELFIES> [C][C][=C][C][=C][C][=C][Ring1][=Branch1][C][=C][C][=C][N][=C][Branch1][C][N][C][Branch2][Ring1][Ring2][C][C][Branch1][C][C][C][=Branch1][C][=O][N][C][C][C][C][O][C][C][Ring1][=Branch1][=C][C][Ring2][Ring1][Ring2][=C][Ring2][Ring1][Branch2] </SELFIES> against BACE-1.<GRAPH> <mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol> </GRAPH><|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+        "selfies": "[C][C][=C][C][=C][C][=C][Ring1][=Branch1][C][=C][C][=C][N][=C][Branch1][C][N][C][Branch2][Ring1][Ring2][C][C][Branch1][C][C][C][=Branch1][C][=O][N][C][C][C][C][O][C][C][Ring1][=Branch1][=C][C][Ring2][Ring1][Ring2][=C][Ring2][Ring1][Branch2]",
+    },
+    # BBBP Classification
+    {
+        "task": "smol-property_prediction-bbbp",
+        "raw_prompt": """<|startoftext|><|start_header_id|>system<|end_header_id|>
+
+You are a helpful assistant for molecular chemistry, to address tasks including molecular property classification, molecular property regression, chemical reaction prediction, molecule captioning, molecule generation.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Is the molecule <SELFIES> [C][C][=Branch1][C][=O][N][C][C][C][C][C][Ring1][=Branch1] </SELFIES> capable of penetrating the blood-brain barrier?<GRAPH> <mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol> </GRAPH><|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+        "selfies": "[C][C][=Branch1][C][=O][N][C][C][C][C][C][Ring1][=Branch1]",
+    },
+    # ClinTox Classification
+    {
+        "task": "smol-property_prediction-clintox",
+        "raw_prompt": """<|startoftext|><|start_header_id|>system<|end_header_id|>
+
+You are a helpful assistant for molecular chemistry, to address tasks including molecular property classification, molecular property regression, chemical reaction prediction, molecule captioning, molecule generation.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Predict the clinical toxicity of the molecule: <SELFIES> [C][C][O][C][=Branch1][C][=O][C][C][C][N][C][C][Ring1][Branch1] </SELFIES><GRAPH> <mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol> </GRAPH><|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+        "selfies": "[C][C][O][C][=Branch1][C][=O][C][C][C][N][C][C][Ring1][Branch1]",
+    },
+    # HIV Classification
+    {
+        "task": "smol-property_prediction-hiv",
+        "raw_prompt": """<|startoftext|><|start_header_id|>system<|end_header_id|>
+
+You are a helpful assistant for molecular chemistry, to address tasks including molecular property classification, molecular property regression, chemical reaction prediction, molecule captioning, molecule generation.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Is the molecule <SELFIES> [C][=C][C][=C][C][=C][Ring1][=Branch1][C][=Branch1][C][=O][N][C][=C][C][=C][C][=C][Ring1][=Branch1] </SELFIES> active against HIV?<GRAPH> <mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol> </GRAPH><|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+        "selfies": "[C][=C][C][=C][C][=C][Ring1][=Branch1][C][=Branch1][C][=O][N][C][=C][C][=C][C][=C][Ring1][=Branch1]",
+    },
+    # QM9 HOMO Regression
+    {
+        "task": "qm9_homo",
+        "raw_prompt": """<|startoftext|><|start_header_id|>system<|end_header_id|>
+
+You are a helpful assistant for molecular chemistry, to address tasks including molecular property classification, molecular property regression, chemical reaction prediction, molecule captioning, molecule generation.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Calculate the HOMO energy of the molecule <SELFIES> [C][C][C][C][O] </SELFIES> in Hartree units.<GRAPH> <mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol> </GRAPH><|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+        "selfies": "[C][C][C][C][O]",
+    },
+    # ESOL Regression
+    {
+        "task": "smol-property_prediction-esol",
+        "raw_prompt": """<|startoftext|><|start_header_id|>system<|end_header_id|>
+
+You are a helpful assistant for molecular chemistry, to address tasks including molecular property classification, molecular property regression, chemical reaction prediction, molecule captioning, molecule generation.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Predict the aqueous solubility (logS) of the molecule: <SELFIES> [C][=C][C][=C][C][=C][Ring1][=Branch1][O] </SELFIES><GRAPH> <mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol> </GRAPH><|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+        "selfies": "[C][=C][C][=C][C][=C][Ring1][=Branch1][O]",
+    },
+    # Forward Reaction Prediction
+    {
+        "task": "forward_reaction_prediction",
+        "raw_prompt": """<|startoftext|><|start_header_id|>system<|end_header_id|>
+
+You are a helpful assistant for molecular chemistry, to address tasks including molecular property classification, molecular property regression, chemical reaction prediction, molecule captioning, molecule generation.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Given the reactants <SELFIES> [C][C][=Branch1][C][=O][Cl] </SELFIES> and <SELFIES> [N][C][=C][C][=C][C][=C][Ring1][=Branch1] </SELFIES>, predict the product of the reaction.<GRAPH> <mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol> </GRAPH><|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+        "selfies": "[C][C][=Branch1][C][=O][Cl]",
+    },
+    # Retrosynthesis
+    {
+        "task": "retrosynthesis",
+        "raw_prompt": """<|startoftext|><|start_header_id|>system<|end_header_id|>
+
+You are a helpful assistant for molecular chemistry, to address tasks including molecular property classification, molecular property regression, chemical reaction prediction, molecule captioning, molecule generation.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Provide the reactants for synthesizing <SELFIES> [C][C][=Branch1][C][=O][N][C][=C][C][=C][C][=C][Ring1][=Branch1] </SELFIES>.<GRAPH> <mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol> </GRAPH><|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+        "selfies": "[C][C][=Branch1][C][=O][N][C][=C][C][=C][C][=C][Ring1][=Branch1]",
+    },
+    # Mol2Text (Captioning)
+    {
+        "task": "chebi-20-mol2text",
+        "raw_prompt": """<|startoftext|><|start_header_id|>system<|end_header_id|>
+
+You are a helpful assistant for molecular chemistry, to address tasks including molecular property classification, molecular property regression, chemical reaction prediction, molecule captioning, molecule generation.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Describe this molecule: <SELFIES> [C][O][C][=C][C][Branch1][C][O][=C][Branch1][C][C][C][=C][Ring1][Branch2][C][=Branch1][C][=O][C][C@@H1][Branch1][=Branch2][C][=C][C][=C][C][=C][Ring1][=Branch1][O][Ring1][=N] </SELFIES><GRAPH> <mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol> </GRAPH><|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+        "selfies": "[C][O][C][=C][C][Branch1][C][O][=C][Branch1][C][C][C][=C][Ring1][Branch2][C][=Branch1][C][=O][C][C@@H1][Branch1][=Branch2][C][=C][C][=C][C][=C][Ring1][=Branch1][O][Ring1][=N]",
+    },
+    # Text2Mol (Generation)
+    {
+        "task": "chebi-20-text2mol",
+        "raw_prompt": """<|startoftext|><|start_header_id|>system<|end_header_id|>
+
+You are a helpful assistant for molecular chemistry, to address tasks including molecular property classification, molecular property regression, chemical reaction prediction, molecule captioning, molecule generation.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Generate a molecule based on this description: <DESCRIPTION>The molecule is a member of the class of benzofurans that is 2,3-dihydrobenzofuran substituted by a methyl group at position 2.</DESCRIPTION><GRAPH> <mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol> </GRAPH><|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+        "selfies": "",
+    },
+    # SMOL Molecule Generation
+    {
+        "task": "smol-molecule_generation",
+        "raw_prompt": """<|startoftext|><|start_header_id|>system<|end_header_id|>
+
+You are a helpful assistant for molecular chemistry, to address tasks including molecular property classification, molecular property regression, chemical reaction prediction, molecule captioning, molecule generation.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Design a molecule with the following properties: <DESCRIPTION>The molecule is an organic compound containing a benzene ring with an attached hydroxyl group.</DESCRIPTION><GRAPH> <mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol><mol> </GRAPH><|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+        "selfies": "",
+    },
+]
+
 CHEMDFM_TEST_CASES = [
     # BACE Classification
     {
@@ -567,6 +795,36 @@ def test_chemdfm_formatter():
     return failed == 0
 
 
+def test_galactica_formatter():
+    """Galactica formatter 테스트 - 각 task별 프롬프트 예시 출력"""
+    print("=" * 80)
+    print("Testing Galactica Formatter")
+    print("=" * 80)
+
+    formatter = PromptFormatter("galactica")
+
+    for i, tc in enumerate(GALACTICA_TEST_CASES):
+        task = tc["task"]
+        raw_prompt = tc["raw_prompt"]
+        selfies = tc["selfies"]
+
+        print(f"\n{'='*80}")
+        print(f"[Test {i+1}] Task: {task}")
+        print(f"{'='*80}")
+
+        # Raw prompt
+        print("\n[Raw Prompt]")
+        print("-" * 40)
+        print(raw_prompt[:500] + "..." if len(raw_prompt) > 500 else raw_prompt)
+
+        # Formatted prompt
+        print("\n[Galactica Formatted Prompt]")
+        print("-" * 40)
+        result = formatter.format(raw_prompt, selfies, task)
+        print(result)
+        print()
+
+
 def test_intrinsic_chemdfm():
     """intrinsic_prompt=True/False 비교 테스트"""
     print("=" * 60)
@@ -612,14 +870,7 @@ Generate a molecule based on this description: The molecule is a member of the c
         print(f"[{tc['name']}] task={tc['task']}")
         print(f"{'='*60}")
 
-        # # intrinsic_prompt=True
-        # print("\n[intrinsic_prompt=True] (ChemDFM 맞춤 프롬프트)")
-        # print("-" * 40)
-        # result_true = format_prompt_for_chemdfm(
-        #     tc["raw_prompt"], tc["selfies"], tc["task"], intrinsic_prompt=True
-        # )
-        # print(result_true)
-        # raw prompt 
+        # raw prompt
         print("\n[raw prompt] ")
         print("-" * 40)
         print(tc["raw_prompt"])
@@ -633,17 +884,22 @@ Generate a molecule based on this description: The molecule is a member of the c
 
 
 if __name__ == "__main__":
-    '''
-    
-    '''
     import sys
 
     # Check command line arguments
-    if len(sys.argv) > 1 and sys.argv[1] == "intrinsic":
-        test_intrinsic_chemdfm()
-        sys.exit(0)
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "galactica":
+            test_galactica_formatter()
+            sys.exit(0)
+        elif sys.argv[1] == "chemdfm" or sys.argv[1] == "intrinsic":
+            test_intrinsic_chemdfm()
+            sys.exit(0)
 
-    # Run default tests
-    # success = test_chemdfm_formatter()
-
-    sys.exit(0 if success else 1)
+    # Default: show help
+    print("Prompt Formatter Test Utility")
+    print("=" * 40)
+    print("\nUsage:")
+    print("  python -m prompts.formatter galactica  - Test Galactica prompts")
+    print("  python -m prompts.formatter chemdfm    - Test ChemDFM prompts")
+    print()
+    sys.exit(0)

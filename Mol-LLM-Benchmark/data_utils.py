@@ -252,11 +252,11 @@ class DataCollator(DataCollatorForSeq2Seq):
                 # Route to appropriate formatter
                 # Check filename first for LoRA-based models (e.g., LlaSMol uses base Mistral)
                 if 'llasmol' in filename or 'llasmol' in model_name:
-                    formatted_prompt = format_prompt_for_llasmol(p, selfies_str, task_name)
+                    formatted_prompt = format_prompt_for_llasmol(p, selfies_str, task_name,intrinsic_prompt=intrinsic_prompt,)
                 elif is_galactica:
                     formatted_prompt = format_prompt_for_galactica(p, selfies_str, task_name)
                 elif 'chemdfm' in model_name or 'chemdfm' in filename:
-                    formatted_prompt = format_prompt_for_chemdfm(p, selfies_str, task_name, intrinsic_prompt=intrinsic_prompt, wrapper=wrapper)
+                    formatted_prompt = format_prompt_for_chemdfm(p, selfies_str, task_name, intrinsic_prompt=intrinsic_prompt)
                 elif 'llama' in model_name:
                     formatted_prompt = format_prompt_for_llama(p, selfies_str, task_name)
                 elif 'mistral' in model_name:
