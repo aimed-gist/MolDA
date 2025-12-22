@@ -5,8 +5,9 @@ export TOKENIZERS_PARALLELISM=false
 gpus="'0,1,2,3'"
 
 # 데이터 설정
-direct_data_root="/workspace/DATA/GSAI-ML-LLaDA-8B-Instruct_string+graph_q32_test_3.3M_0415_verified_filtered_512_indexed"
+# direct_data_root="/workspace/DATA/GSAI-ML-LLaDA-8B-Instruct_string+graph_q32_test_3.3M_0415_verified_filtered_512_indexed"
 # direct_data_root="/workspace/Origin/Mol_llm_Origin/data/mol-llm_testset_indexed"
+direct_data_root="/workspace/DATA/GSAI-ML-LLaDA-8B-Instruct_string+graph_q32_test_3.3M_0415_deduplicate_CLEANED_indexed"
 
 # 결과 파일명
 filename="chemdfm_test"
@@ -18,4 +19,5 @@ trainer.devices=$gpus \
 mode=test \
 filename=${filename} \
 +data.direct_data_root=${direct_data_root} \
-trainer.skip_sanity_check=false
+trainer.skip_sanity_check=false \
++return_scores=true
