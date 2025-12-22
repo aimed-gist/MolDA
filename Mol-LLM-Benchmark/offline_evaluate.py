@@ -31,6 +31,7 @@ from nltk.translate.bleu_score import corpus_bleu
 from nltk.translate.meteor_score import meteor_score
 from rouge_score import rouge_scorer
 from tqdm import tqdm
+import selfies as sf
 
 # Task 정의 import
 from model.result_saver import (
@@ -190,6 +191,83 @@ def parse_smiles_from_label(label: str) -> str:
     return label.strip()
 
 
+def calculate_fcd(gt_smiles_list: List[str], pred_smiles_list: List[str]) -> float:
+    """
+    FCD (Fréchet ChEMBL Distance) 계산
+
+    Args:
+        gt_smiles_list: Ground truth SMILES 리스트
+        pred_smiles_list: Predicted SMILES 리스트
+
+    Returns:
+        FCD score (낮을수록 좋음, 0 = 동일한 분포)
+    """
+    try:
+        from fcd import get_fcd, load_ref_model
+    except ImportError:
+        print("[WARNING] fcd package not installed. Run: pip install fcd")
+        return float('nan')
+
+    if len(gt_smiles_list) < 2 or len(pred_smiles_list) < 2:
+        print("[WARNING] Not enough valid SMILES for FCD calculation (need at least 2)")
+        return float('nan')
+
+    try:
+        model = load_ref_model()
+        fcd_score = get_fcd(gt_smiles_list, pred_smiles_list, model)
+        return fcd_score
+    except Exception as e:
+        print(f"[WARNING] FCD calculation failed: {e}")
+        return float('nan')
+
+
+def calculate_bleu_selfies(gt_smiles_list: List[str], pred_smiles_list: List[str]) -> float:
+    """
+    BLEU-SELFIES 계산 (SMILES → SELFIES 변환 후 토큰 단위 BLEU)
+
+    Args:
+        gt_smiles_list: Ground truth SMILES 리스트 (canonical)
+        pred_smiles_list: Predicted SMILES 리스트 (canonical)
+
+    Returns:
+        BLEU-SELFIES score (0-100, 높을수록 좋음)
+    """
+    if not gt_smiles_list or not pred_smiles_list:
+        return 0.0
+
+    ref_selfies_list = []
+    pred_selfies_list = []
+
+    for gt_smiles, pred_smiles in zip(gt_smiles_list, pred_smiles_list):
+        try:
+            # SMILES → SELFIES 변환
+            gt_selfies = sf.encoder(gt_smiles)
+            pred_selfies = sf.encoder(pred_smiles)
+
+            if gt_selfies and pred_selfies:
+                # SELFIES 토큰화 (각 [...] 단위로 분리)
+                gt_tokens = list(sf.split_selfies(gt_selfies))
+                pred_tokens = list(sf.split_selfies(pred_selfies))
+
+                ref_selfies_list.append([gt_tokens])  # corpus_bleu는 ref가 list of list 형태
+                pred_selfies_list.append(pred_tokens)
+        except Exception:
+            continue
+
+    if not pred_selfies_list:
+        return 0.0
+
+    try:
+        bleu_selfies = corpus_bleu(
+            ref_selfies_list, pred_selfies_list,
+            weights=(0.25, 0.25, 0.25, 0.25)
+        )
+        return bleu_selfies * 100  # 0-100 스케일
+    except Exception as e:
+        print(f"[WARNING] BLEU-SELFIES calculation failed: {e}")
+        return 0.0
+
+
 def evaluate_molecule_generation(df: pd.DataFrame) -> Dict[str, Any]:
     """
     Molecule Generation CSV에서 메트릭 계산
@@ -198,10 +276,22 @@ def evaluate_molecule_generation(df: pd.DataFrame) -> Dict[str, Any]:
     - validity_ratio: 전체 샘플 중 유효한 분자 비율
     - exact_match, fingerprint sims, levenshtein: 유효한 분자만 평균
     - text_exact_match: 텍스트 관점에서 정확히 일치하는 비율 (canonical화 없이)
+    - fcd: Fréchet ChEMBL Distance (유효한 분자만 사용)
 
     필요 컬럼: idx, task, label, pred, validity, exact_match, MACCS_FTS, RDK_FTS, morgan_FTS, levenshtein
     """
+    try:
+        from rdkit import Chem
+        from rdkit import RDLogger
+        RDLogger.DisableLog('rdApp.*')  # RDKit 경고 메시지 비활성화
+    except ImportError:
+        Chem = None
+
     results = {}
+
+    # 전체 task에 대한 FCD 계산을 위한 SMILES 수집
+    all_gt_smiles = []
+    all_pred_smiles = []
 
     for task in df['task'].unique():
         subset = df[df['task'] == task]
@@ -225,12 +315,41 @@ def evaluate_molecule_generation(df: pd.DataFrame) -> Dict[str, Any]:
 
         # text_exact_match: 텍스트 관점에서 정확히 일치하는 비율 (전체 샘플 대상)
         text_matches = 0
+
+        # FCD 계산을 위한 SMILES 수집
+        task_gt_smiles = []
+        task_pred_smiles = []
+
         for _, row in subset.iterrows():
             label_smiles = parse_smiles_from_label(row['label'])
             pred_smiles = str(row['pred']).strip() if pd.notna(row['pred']) else ""
+
             if label_smiles == pred_smiles:
                 text_matches += 1
+
+            # FCD용 SMILES 수집 (유효한 분자만)
+            if Chem and label_smiles and pred_smiles:
+                try:
+                    gt_mol = Chem.MolFromSmiles(label_smiles)
+                    pred_mol = Chem.MolFromSmiles(pred_smiles)
+                    if gt_mol and pred_mol:
+                        canonical_gt = Chem.MolToSmiles(gt_mol)
+                        canonical_pred = Chem.MolToSmiles(pred_mol)
+                        task_gt_smiles.append(canonical_gt)
+                        task_pred_smiles.append(canonical_pred)
+                        all_gt_smiles.append(canonical_gt)
+                        all_pred_smiles.append(canonical_pred)
+                except:
+                    pass
+
         text_exact_match_ratio = text_matches / len(subset) if len(subset) > 0 else 0
+
+        # Task별 FCD 계산
+        print(f"[{task}] Calculating FCD with {len(task_gt_smiles)} valid SMILES pairs...")
+        task_fcd = calculate_fcd(task_gt_smiles, task_pred_smiles)
+
+        # Task별 BLEU-SELFIES 계산
+        task_bleu_selfies = calculate_bleu_selfies(task_gt_smiles, task_pred_smiles)
 
         results[task] = {
             'validity_ratio': validity_ratio,
@@ -240,7 +359,21 @@ def evaluate_molecule_generation(df: pd.DataFrame) -> Dict[str, Any]:
             'RDK_FTS': rdk_fts,
             'morgan_FTS': morgan_fts,
             'levenshtein_score': levenshtein,
+            'bleu_selfies': task_bleu_selfies,
+            'fcd': task_fcd,
             'num_samples': len(subset),
+            'num_valid_for_fcd': len(task_gt_smiles),
+        }
+
+    # 전체 molecule generation task에 대한 통합 FCD 및 BLEU-SELFIES
+    if len(all_gt_smiles) > 0:
+        print(f"\n[ALL MOLECULE GENERATION] Calculating overall FCD with {len(all_gt_smiles)} valid SMILES pairs...")
+        overall_fcd = calculate_fcd(all_gt_smiles, all_pred_smiles)
+        overall_bleu_selfies = calculate_bleu_selfies(all_gt_smiles, all_pred_smiles)
+        results['_overall_fcd'] = {
+            'fcd': overall_fcd,
+            'bleu_selfies': overall_bleu_selfies,
+            'num_valid_pairs': len(all_gt_smiles),
         }
 
     return results
@@ -392,7 +525,7 @@ def load_csv_files(csv_dir: str, script_name: str) -> Dict[str, pd.DataFrame]:
 
     # 1. 먼저 통합 CSV 파일 찾기 (새 구조)
     unified_files = [f for f in glob.glob(unified_pattern)
-                     if not any(tt in f for tt in ['_classification_', '_regression_', '_molecule_generation_', '_captioning_'])]
+                     if not any(tt in os.path.basename(f) for tt in ['_classification_', '_regression_', '_molecule_generation_', '_captioning_'])]
 
     if unified_files:
         print(f"[Unified] Found {len(unified_files)} unified CSV files")
