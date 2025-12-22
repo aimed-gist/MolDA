@@ -14,8 +14,10 @@ ResultSaver: 샘플별 평가 결과를 통합 CSV로 저장하는 클래스
 
 import os
 import csv
+import yaml
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
+from argparse import Namespace
 
 
 # 태스크 유형 정의
@@ -155,6 +157,52 @@ class ResultSaver:
         # 통합 CSV 파일 경로
         filename = f"{self._time_str}_{self.script_name}_rank{self.rank}.csv"
         self._save_path = os.path.join(self._dir_path, filename)
+
+        # Config 파일 경로
+        config_filename = f"{self._time_str}_{self.script_name}_config.yaml"
+        self._config_path = os.path.join(self._dir_path, config_filename)
+
+    def save_config(self, args):
+        """args를 YAML 파일로 저장 (rank 0에서만 한 번 호출)
+
+        Args:
+            args: argparse.Namespace 또는 OmegaConf DictConfig
+        """
+        if self.rank != 0:
+            return  # rank 0에서만 저장
+
+        # args를 dict로 변환
+        if hasattr(args, '__dict__'):
+            # argparse.Namespace
+            config_dict = vars(args).copy()
+        elif hasattr(args, 'to_container'):
+            # OmegaConf DictConfig
+            from omegaconf import OmegaConf
+            config_dict = OmegaConf.to_container(args, resolve=True)
+        else:
+            # 이미 dict인 경우
+            config_dict = dict(args)
+
+        # 직렬화 불가능한 객체 제거/변환
+        def make_serializable(obj):
+            if obj is None or isinstance(obj, (str, int, float, bool)):
+                return obj
+            elif isinstance(obj, (list, tuple)):
+                return [make_serializable(item) for item in obj]
+            elif isinstance(obj, dict):
+                return {k: make_serializable(v) for k, v in obj.items()}
+            else:
+                return str(obj)
+
+        config_dict = make_serializable(config_dict)
+
+        # 저장 시간 추가
+        config_dict['_saved_at'] = datetime.now(timezone(timedelta(hours=9))).isoformat()
+
+        with open(self._config_path, 'w', encoding='utf-8') as f:
+            yaml.dump(config_dict, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+        print(f"Config saved to: {self._config_path}")
 
     def _write_header_if_needed(self):
         """헤더가 아직 안 쓰여졌으면 작성"""
