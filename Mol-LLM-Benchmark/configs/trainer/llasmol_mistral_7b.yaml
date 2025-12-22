@@ -22,13 +22,13 @@ num_beams: 1
 
 strategy_name: null
 accelerator: gpu
-devices: "0,1,2,3,4,5,6,7"
+devices: "0,1,2,3"
 precision: bf16-mixed
 max_steps: -1
 max_epochs: 10
 every_n_epochs: 1
 task: null
-logging_dir: /workspace/Mol_DA_repo/Mol-LLM-Benchmark/checkpoint/logs
+
 llava_pretraining: 0
 second_stage_start_epoch: 4
 num_workers: 0

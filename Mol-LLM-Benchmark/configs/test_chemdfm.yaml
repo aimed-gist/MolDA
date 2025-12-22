@@ -11,7 +11,7 @@ wandb_entity: jennyshin_gist_2024
 wandb_project: mol-llm-chemdfm_1.0v_13b
 wandb_log_freq: 100
 wandb_id: null
-logging_dir: /workspace/Mol_DA/Mol-LLM-Benchmark/checkpoint/logs_HJ_intrinsic_false_with_wrapper
+logging_dir: /workspace/Mol_DA/Mol-LLM-Benchmark/checkpoint/HJ_1222/logs/intrinsic_false/non_classification_chemdfm_13B_20251222
 debug: true
 ckpt_path: null
 pretrained_ckpt_path: null
@@ -35,7 +35,7 @@ include_failed_as_zero: true
 # Prompt 설정
 # intrinsic_prompt: true → ChemDFM 맞춤 프롬프트 사용 (기본값)
 # intrinsic_prompt: false → 원본 프롬프트 유지 (태그만 제거)
-intrinsic_prompt: false
+intrinsic_prompt: false # qm9 계열은 chemdfm 맞춤 이용
 
 # Wrapper 설정
 # wrapper: true → [Round 0]\nHuman: ...\nAssistant: 형식으로 감싸기

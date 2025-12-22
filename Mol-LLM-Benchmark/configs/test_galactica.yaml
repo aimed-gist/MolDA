@@ -6,7 +6,7 @@ defaults:
 filename: galactica_test
 seed: 42
 mode: test
-
+logging_dir:  /workspace/Mol_DA/Mol-LLM-Benchmark/checkpoint/HJ_1222/logs/intrinsic_false/non_classification_galactica_20251222
 wandb_entity: jennyshin_gist_2024
 wandb_project: mol-llm-galactica
 wandb_log_freq: 100
@@ -31,3 +31,13 @@ shuffle_graph: false
 process_disjoint: true
 
 include_failed_as_zero: true
+
+# Prompt 설정
+# intrinsic_prompt: true → ChemDFM 맞춤 프롬프트 사용 (기본값)
+# intrinsic_prompt: false → 원본 프롬프트 유지 (태그만 제거)
+intrinsic_prompt: false 
+
+# Wrapper 설정
+# wrapper: true → [Round 0]\nHuman: ...\nAssistant: 형식으로 감싸기
+# wrapper: false → wrapper 없이 원본 instruction만 사용
+wrapper: true
