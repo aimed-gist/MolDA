@@ -8,7 +8,7 @@ import numpy as np
 from collections import Counter
 
 import selfies as sf
-
+import os
 import rdkit.Chem as Chem
 import re
 import copy
@@ -39,6 +39,8 @@ from prompts import (
     format_prompt_for_gpt,
     format_prompt_for_llasmol,
     format_prompt_for_chemdfm,
+    format_prompt_for_3d_molm,
+    format_prompt_for_mol_llm
 )
 
 
@@ -253,16 +255,21 @@ class DataCollator(DataCollatorForSeq2Seq):
                 # Check filename first for LoRA-based models (e.g., LlaSMol uses base Mistral)
                 if 'llasmol' in filename or 'llasmol' in model_name:
                     formatted_prompt = format_prompt_for_llasmol(p, selfies_str, task_name,intrinsic_prompt=intrinsic_prompt,)
+                elif 'molm_3d' in filename or '3d_molm' in filename or '3dmolm' in filename:
+                    formatted_prompt = format_prompt_for_3d_molm(p, selfies_str, task_name)
                 elif is_galactica:
                     formatted_prompt = format_prompt_for_galactica(p, selfies_str, task_name)
                 elif 'chemdfm' in model_name or 'chemdfm' in filename:
                     formatted_prompt = format_prompt_for_chemdfm(p, selfies_str, task_name, intrinsic_prompt=intrinsic_prompt)
                 elif 'llama' in model_name:
                     formatted_prompt = format_prompt_for_llama(p, selfies_str, task_name)
-                elif 'mistral' in model_name:
-                    formatted_prompt = format_prompt_for_mistral(p, selfies_str, task_name)
+                # elif 'mistral' in model_name:
+                #     formatted_prompt = format_prompt_for_mistral(p, selfies_str, tas_name)
                 elif 'gpt' in model_name:
                     formatted_prompt = format_prompt_for_gpt(p, selfies_str, task_name)
+                elif 'HJChoi' in filename:
+                    formatted_prompt = format_prompt_for_mol_llm(p,selfies_str,task_name)
+                    
                 else:
                     # Default: no special formatting
                     formatted_prompt = p
@@ -270,6 +277,17 @@ class DataCollator(DataCollatorForSeq2Seq):
                 new_prompt_text.append(formatted_prompt)
 
             prompt_text = new_prompt_text
+        else:
+            # Non-benchmark mode: apply HJChoi formatting if filename matches
+            filename = getattr(self.args, 'filename', '').lower()
+            if 'hjchoi' in filename:
+                new_prompt_text = []
+                for i, p in enumerate(prompt_text):
+                    selfies_str = list_selfies[i]
+                    task_name = task_names[i] if i < len(task_names) else ""
+                    formatted_prompt = format_prompt_for_mol_llm(p, selfies_str, task_name)
+                    new_prompt_text.append(formatted_prompt)
+                prompt_text = new_prompt_text
 
         if not self.train and self.args.eval_modality_util in [
             "string",
@@ -567,6 +585,68 @@ class DataCollator(DataCollatorForSeq2Seq):
         features["raw_prompt_text"] = raw_prompt_text  # 원본 프롬프트 텍스트 (변환 전)
         features["prompt_text"] = prompt_text  # 변환된 프롬프트 텍스트
         features["target_text"] = target_text  # 타겟 텍스트
+
+        # 3D-MoLM용 3D graph 생성
+        filename = getattr(self.args, 'filename', '').lower()
+        if 'molm_3d' in filename or '3d_molm' in filename or '3dmolm' in filename:
+            from model.molm_3d.graph_utils import smiles2graph_with_timeout, load_unimol_dictionary
+
+            # 캐시 로드 (한 번만)
+            if not hasattr(self, '_molm3d_graph_cache'):
+                direct_data_root = getattr(self.args, 'direct_data_root', None)
+                if direct_data_root:
+                    # 캐시 경로 후보들 (폴더 내부, 폴더 외부)
+                    cache_paths = [
+                        os.path.join(direct_data_root, 'molm3d_graphs.pt'),  # 폴더 내부
+                        direct_data_root.rstrip('/') + '_molm3d_graphs.pt',  # 폴더 외부
+                    ]
+                    cache_path = None
+                    for path in cache_paths:
+                        if os.path.exists(path):
+                            cache_path = path
+                            break
+
+                    if cache_path:
+                        print(f"[DataCollator] Loading MoLM3D graph cache from: {cache_path}")
+                        self._molm3d_graph_cache = torch.load(cache_path, weights_only=False)
+                        print(f"[DataCollator] Loaded {len(self._molm3d_graph_cache)} cached graphs")
+                    else:
+                        print(f"[DataCollator] No cache found, will generate graphs on-the-fly")
+                        self._molm3d_graph_cache = None
+                else:
+                    self._molm3d_graph_cache = None
+
+            # dictionary 로드 (한 번만, fallback용)
+            if not hasattr(self, '_unimol_dictionary'):
+                self._unimol_dictionary = load_unimol_dictionary()
+
+            molm_3d_graphs = []
+            for i, sample in enumerate(batch):
+                idx = sample.get("idx", i)
+
+                # 캐시에서 로드 시도
+                if self._molm3d_graph_cache and idx in self._molm3d_graph_cache:
+                    cached = self._molm3d_graph_cache[idx]
+                    # Convert numpy arrays to torch tensors if needed
+                    if isinstance(cached[0], np.ndarray):
+                        graph = (
+                            torch.from_numpy(cached[0]).long(),
+                            torch.from_numpy(cached[1]),
+                            torch.from_numpy(cached[2]).long()
+                        )
+                    else:
+                        graph = cached
+                else:
+                    # Fallback: 캐시에 없으면 실시간 생성 (타임아웃 + 2D fallback 지원)
+                    try:
+                        selfies_str = list_selfies[i] if i < len(list_selfies) else ""
+                        smiles = sf.decoder(selfies_str) if selfies_str else ""
+                        graph = smiles2graph_with_timeout(smiles, self._unimol_dictionary, timeout=5) if smiles else None
+                    except:
+                        graph = None
+                molm_3d_graphs.append(graph)
+            features["molm_3d_graphs"] = molm_3d_graphs
+
         if "graph" in self.mol_representation:
             graphs = self.graph_collator(list_graphs)
             additional_graphs = self.graph_collator(list_additional_graphs)

@@ -22,7 +22,7 @@ num_beams: 1
 
 strategy_name: null
 accelerator: gpu
-devices: "0,1,2,3,4,5,6,7"
+devices: "0,1,2,3"
 precision: bf16-mixed
 max_steps: -1
 max_epochs: 10

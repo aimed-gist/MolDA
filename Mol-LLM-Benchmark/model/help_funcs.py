@@ -746,6 +746,10 @@ def convert_logit2binary_prob(logits, predictions, tokenizer):
     Yes_token_id = tokenizer.encode("Yes", add_special_tokens=False)[-1]
     No_token_id = tokenizer.encode("No", add_special_tokens=False)[-1]
 
+    # MoLM3D: "can" vs "cannot" token IDs
+    can_token_id = tokenizer.encode("can", add_special_tokens=False)[-1]
+    cannot_token_id = tokenizer.encode("cannot", add_special_tokens=False)[-1]
+
     bos_token, eos_token = added_tokens.BOOL
 
     try:
@@ -792,6 +796,58 @@ def convert_logit2binary_prob(logits, predictions, tokenizer):
                 found_position = True
                 print(f"Found standalone word '{matched_word}' in prediction: {pred}")
 
+        # 3. MoLM3D natural language patterns: "can inhibit" / "cannot inhibit"
+        #    Find "can" or "cannot" token position and use can/cannot logits
+        #
+        #    Key insight: logits[i] contains the scores used to predict pred_token_ids[i]
+        #    So if "can" is at pred_token_ids[k], we use logits at position k-1
+        #    (because logits[k-1] was used to generate the k-th token)
+        #    But since we're looking at the vocab distribution at that position,
+        #    we actually want logits[k-1] to compare P(can) vs P(cannot)
+        #
+        #    However, for the FIRST generated token, logits[0] predicts pred_token_ids[0]
+        #    So the position in logits == position in pred_token_ids
+        if not found_position:
+            pred_lower = pred.lower()
+            if 'cannot inhibit' in pred_lower or 'can not inhibit' in pred_lower or 'not inhibit' in pred_lower or \
+               'can inhibit' in pred_lower or 'inhibit' in pred_lower:
+                # Find "can" or "cannot" token position in the generated sequence
+                try:
+                    # Find position of "can" or "cannot" token
+                    # logits[pos] contains the probability distribution that generated pred_token_ids[pos]
+                    logits_position = None
+                    if can_token_id in pred_token_ids:
+                        token_position = pred_token_ids.index(can_token_id)
+                        # logits are 0-indexed, logits[i] predicts token[i]
+                        logits_position = token_position
+                    elif cannot_token_id in pred_token_ids:
+                        token_position = pred_token_ids.index(cannot_token_id)
+                        logits_position = token_position
+
+                    if logits_position is not None and logits_position < logits.shape[1]:
+                        prediction_position_ids[idx, logits_position] = True
+                        is_using_prediction_position_ids[idx, :] = True
+                        use_true_false_pair[idx] = "molm3d_can"  # Use can/cannot pair
+                        found_position = True
+                    else:
+                        # Fallback: use first position with hard label
+                        prediction_position_ids[idx, 0] = True
+                        is_using_prediction_position_ids[idx, :] = True
+                        if 'cannot' in pred_lower or 'not inhibit' in pred_lower:
+                            use_true_false_pair[idx] = "molm3d_negative"
+                        else:
+                            use_true_false_pair[idx] = "molm3d_positive"
+                        found_position = True
+                except Exception as e:
+                    # Fallback to hard label
+                    prediction_position_ids[idx, 0] = True
+                    is_using_prediction_position_ids[idx, :] = True
+                    if 'cannot' in pred_lower or 'not inhibit' in pred_lower:
+                        use_true_false_pair[idx] = "molm3d_negative"
+                    else:
+                        use_true_false_pair[idx] = "molm3d_positive"
+                    found_position = True
+
         if not found_position:
             prediction_position_ids[idx, 0] = True
             is_using_prediction_position_ids[idx, :] = False
@@ -802,18 +858,37 @@ def convert_logit2binary_prob(logits, predictions, tokenizer):
     # Calculate probabilities for each prediction using appropriate token pair
     total_probs_list = []
     for idx in range(position_logits.shape[0]):
-        if use_true_false_pair[idx]:
+        pair_type = use_true_false_pair[idx]
+
+        # MoLM3D: use can/cannot token logits for probability
+        if pair_type == "molm3d_can":
+            # Use "can" vs "cannot" token pair for softmax
+            pos_logit = position_logits[idx, can_token_id]  # "can" = positive
+            neg_logit = position_logits[idx, cannot_token_id]  # "cannot" = negative
+            pair_logits = torch.stack([neg_logit, pos_logit])
+            pair_probs = pair_logits.softmax(dim=0)
+        elif pair_type == "molm3d_positive":
+            # Fallback: "can inhibit" → positive prediction (hard label)
+            pair_probs = torch.tensor([0.0, 1.0], device=position_logits.device)
+        elif pair_type == "molm3d_negative":
+            # Fallback: "cannot inhibit" → negative prediction (hard label)
+            pair_probs = torch.tensor([1.0, 0.0], device=position_logits.device)
+        elif pair_type is True:
             # Use True/False token pair
             pos_logit = position_logits[idx, True_token_id]
             neg_logit = position_logits[idx, False_token_id]
-        else:
+            pair_logits = torch.stack([neg_logit, pos_logit])
+            pair_probs = pair_logits.softmax(dim=0)
+        elif pair_type is False:
             # Use Yes/No token pair
             pos_logit = position_logits[idx, Yes_token_id]
             neg_logit = position_logits[idx, No_token_id]
+            pair_logits = torch.stack([neg_logit, pos_logit])
+            pair_probs = pair_logits.softmax(dim=0)
+        else:
+            # Fallback
+            pair_probs = torch.tensor([0.5, 0.5], device=position_logits.device)
 
-        # Softmax over the two logits
-        pair_logits = torch.stack([neg_logit, pos_logit])
-        pair_probs = pair_logits.softmax(dim=0)
         total_probs_list.append(pair_probs)
 
     total_probs = torch.stack(total_probs_list, dim=0)
@@ -833,6 +908,7 @@ def parse_flexible_molecule(text):
     Parse molecule from various output formats and convert to SELFIES.
     Supports:
     1. Mol-LLM format: <SELFIES>...</SELFIES>
+    1-1. LlaSMol format: <SMILES>...</SMILES>
     2. Galactica format: [START_I_SMILES]...[END_I_SMILES]
     3. Plain SMILES: CC(=O)O
 
@@ -859,6 +935,21 @@ def parse_flexible_molecule(text):
     if match:
         selfies_str = match.group(1).replace(' ', '')
         return selfies_str
+
+    # 1-1. Try LlaSMol SMILES format: <SMILES>...</SMILES>
+    match = re.search(r'<SMILES>\s*(.*?)\s*</SMILES>', text)
+    if match:
+        smiles_str = match.group(1).strip()
+        try:
+            # Validate SMILES
+            mol = Chem.MolFromSmiles(smiles_str)
+            if mol is not None:
+                # Convert to canonical SMILES first, then to SELFIES
+                canonical_smiles = Chem.CanonSmiles(smiles_str)
+                selfies_str = selfies.encoder(canonical_smiles)
+                return selfies_str
+        except:
+            pass
 
     # 2. Try Galactica SMILES format: [START_I_SMILES]...[END_I_SMILES]
     match = re.search(r'\[START_I_SMILES\](.*?)\[END_I_SMILES\]', text)
@@ -994,6 +1085,8 @@ def parse_flexible_number(text, task_name=None):
     # Tasks that require Hartree units (eV is wrong)
     HARTREE_TASKS = {'qm9_homo', 'qm9_lumo', 'qm9_homo_lumo_gap',
                      'alchemy_homo', 'alchemy_lumo', 'alchemy_homo_lumo_gap'}
+    # Tasks that require Log scale (mol/L should be converted to Log10)
+    LOG_SOLUBILITY_TASKS = {'smol-property_prediction-esol'}
     if not text:
         return None
 
@@ -1033,12 +1126,28 @@ def parse_flexible_number(text, task_name=None):
             pass
 
     # 2. Check for energy units based on task type (BEFORE extracting plain numbers)
-    # For Hartree tasks (qm9_homo, etc.), eV is wrong unit - treat as parse failure
+    # For Hartree tasks (qm9_homo, etc.), convert eV to Hartree
+    # 1 eV = 0.0367493 Hartree
+    EV_TO_HARTREE = 0.0367493
     if task_name and task_name in HARTREE_TASKS:
-        ev_match = re.search(r'[-+]?\d+\.?\d*\s*eV\b', text, re.IGNORECASE)
+        # Handle numbers with spaces like "-5. 962 eV" or "-6. 490 eV"
+        ev_match = re.search(r'([-+]?\d+)\s*\.\s*(\d+)\s*eV\b', text, re.IGNORECASE)
         if ev_match:
-            # eV unit found - wrong unit for HOMO/LUMO (should be Hartree), treat as failure
-            return None
+            try:
+                ev_value = float(f"{ev_match.group(1)}.{ev_match.group(2)}")
+                hartree_value = ev_value * EV_TO_HARTREE
+                return hartree_value
+            except:
+                pass
+        # Also try normal format without spaces
+        ev_match = re.search(r'([-+]?\d+\.?\d*)\s*eV\b', text, re.IGNORECASE)
+        if ev_match:
+            try:
+                ev_value = float(ev_match.group(1))
+                hartree_value = ev_value * EV_TO_HARTREE
+                return hartree_value
+            except:
+                pass
 
     # 3. Accept Hartree units (extract number)
     hartree_match = re.search(r'([-+]?\d+\.?\d*)\s*(?:Hartree|hartree|Ha|a\.u\.|au|H)\b', text)
@@ -1056,7 +1165,34 @@ def parse_flexible_number(text, task_name=None):
         except:
             pass
 
-    # 5. Try to extract number at the START of the text (most common case for benchmarks)
+    # 4b. For ESOL tasks, convert mol/L to Log10
+    # Handle scientific notation like "-3.927e+05 mol/L" or "3.927e-05 mol/L"
+    if task_name and task_name in LOG_SOLUBILITY_TASKS:
+        mol_match = re.search(r'([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)\s*mol/L', text, re.IGNORECASE)
+        if mol_match:
+            try:
+                import math
+                mol_value = float(mol_match.group(1))
+                # If negative, apply log10 to absolute value and keep negative sign
+                if mol_value < 0:
+                    log_value = -math.log10(abs(mol_value))
+                    return log_value
+                elif mol_value > 0:
+                    log_value = math.log10(mol_value)
+                    return log_value
+            except:
+                pass
+
+    # 5. Handle numbers with spaces like "2. 90" or "-3. 14"
+    space_num_match = re.search(r'([-+]?\d+)\s*\.\s*(\d+)', text)
+    if space_num_match:
+        try:
+            combined = f"{space_num_match.group(1)}.{space_num_match.group(2)}"
+            return float(combined)
+        except:
+            pass
+
+    # 6. Try to extract number at the START of the text (most common case for benchmarks)
     # This handles cases like: "-3.09 COc1ccc(OC)cc1", "4.2 [5]_", "-2.4 (comment)"
     text_stripped = text.strip()
     match = re.match(r'^([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)', text_stripped)

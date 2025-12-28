@@ -1,56 +1,102 @@
 #!/bin/bash
 
-echo "==============Killing Galactica Test Processes==============="
+# Target GPUs (0,1,2,3)
+TARGET_GPUS="0 1 2 3"
 
-# Find and kill stage3.py processes
-echo "Searching for stage3.py processes..."
-pids=$(ps aux | grep "stage3.py" | grep "test_galactica" | grep -v grep | awk '{print $2}')
+echo "==============Killing Test Processes (GPU 0,1,2,3)==============="
+
+# 1. Find and kill stage3.py processes (all test types)
+echo "[1/4] Searching for stage3.py processes..."
+pids=$(ps aux | grep -E "python.*stage3\.py" | grep -v grep | awk '{print $2}')
 
 if [ -z "$pids" ]; then
-    echo "No stage3.py processes found."
+    echo "  No stage3.py processes found."
 else
-    echo "Found stage3.py processes: $pids"
+    echo "  Found stage3.py processes: $pids"
     for pid in $pids; do
-        echo "Killing process $pid..."
+        echo "  Killing process $pid..."
         kill -9 $pid 2>/dev/null
     done
 fi
 
-# Find and kill all child python processes (multiprocessing workers)
+# 2. Find and kill multiprocessing spawn workers
 echo ""
-echo "Searching for multiprocessing worker processes..."
-worker_pids=$(ps aux | grep "multiprocessing.spawn" | grep "mol_llm_env" | grep -v grep | awk '{print $2}')
+echo "[2/4] Searching for multiprocessing worker processes..."
+worker_pids=$(ps aux | grep -E "multiprocessing\.(spawn|forkserver|fork)" | grep -v grep | awk '{print $2}')
 
 if [ -z "$worker_pids" ]; then
-    echo "No worker processes found."
+    echo "  No worker processes found."
 else
-    echo "Found worker processes: $worker_pids"
+    echo "  Found worker processes: $worker_pids"
     for pid in $worker_pids; do
-        echo "Killing worker $pid..."
+        echo "  Killing worker $pid..."
         kill -9 $pid 2>/dev/null
     done
 fi
 
-# Find and kill any remaining python processes running in mol_llm_env with high CPU
+# 3. Find and kill python processes with high CPU (>50%)
 echo ""
-echo "Searching for high CPU python processes in mol_llm_env..."
-high_cpu_pids=$(ps aux | grep "mol_llm_env/bin/python" | awk '$3 > 50.0 {print $2}' | grep -v grep)
+echo "[3/4] Searching for high CPU python processes..."
+high_cpu_pids=$(ps aux | grep python | grep -v grep | awk '$3 > 50.0 {print $2}')
 
 if [ -z "$high_cpu_pids" ]; then
-    echo "No high CPU processes found."
+    echo "  No high CPU processes found."
 else
-    echo "Found high CPU processes: $high_cpu_pids"
+    echo "  Found high CPU processes: $high_cpu_pids"
     for pid in $high_cpu_pids; do
-        echo "Killing high CPU process $pid..."
+        echo "  Killing high CPU process $pid..."
         kill -9 $pid 2>/dev/null
     done
 fi
+
+# 4. Find and kill GPU processes on target GPUs (0,1,2,3) only
+echo ""
+echo "[4/4] Searching for GPU processes on GPU 0,1,2,3..."
+if command -v nvidia-smi &> /dev/null; then
+    # Get PIDs for each target GPU
+    for gpu_id in $TARGET_GPUS; do
+        gpu_pids=$(nvidia-smi --id=$gpu_id --query-compute-apps=pid --format=csv,noheader 2>/dev/null | tr -d ' ')
+        if [ -n "$gpu_pids" ]; then
+            echo "  GPU $gpu_id processes: $gpu_pids"
+            for pid in $gpu_pids; do
+                # Check if it's a python process before killing
+                proc_name=$(ps -p $pid -o comm= 2>/dev/null)
+                if [[ "$proc_name" == *"python"* ]]; then
+                    echo "    Killing GPU $gpu_id process $pid ($proc_name)..."
+                    kill -9 $pid 2>/dev/null
+                fi
+            done
+        fi
+    done
+else
+    echo "  nvidia-smi not available, skipping GPU process check."
+fi
+
+# Wait a moment for processes to terminate
+sleep 1
 
 echo ""
 echo "==============Cleanup Complete==============="
-echo "Remaining python processes in mol_llm_env:"
-ps aux | grep "mol_llm_env/bin/python" | grep -v grep | grep -v "ipykernel" | head -5
+
+# Show remaining python processes
+echo ""
+echo "Remaining python processes:"
+remaining=$(ps aux | grep python | grep -v grep | grep -v "ipykernel" | grep -v "jupyter" | grep -v "vscode")
+if [ -z "$remaining" ]; then
+    echo "  (none)"
+else
+    echo "$remaining" | head -10
+fi
+
+# Show GPU memory status for target GPUs
+echo ""
+echo "GPU Memory Status (GPU 0,1,2,3):"
+if command -v nvidia-smi &> /dev/null; then
+    nvidia-smi --id=0,1,2,3 --query-gpu=index,memory.used,memory.total --format=csv 2>/dev/null || echo "  Could not query GPU status."
+else
+    echo "  nvidia-smi not available."
+fi
 
 echo ""
 echo "If you still see running processes, you can manually kill them with:"
-echo "kill -9 <PID>"
+echo "  kill -9 <PID>"

@@ -28,7 +28,7 @@ max_steps: -1
 max_epochs: 12
 every_n_epochs: 1
 task: null
-logging_dir: /workspace/Mol_DA_repo/Mol-LLM-Benchmark/checkpoint/logs
+logging_dir: /workspace/Mol_DA/Mol-LLM-Benchmark/checkpoint/HJ_1223/logs/HJ/lipo
 llava_pretraining: 0
 second_stage_start_epoch: 4
 num_workers: 0
@@ -65,7 +65,7 @@ test_on_trainset: false
 
 # multimodal training
 mol_representation: string+graph
-log_attn_score: true
+log_attn_score: false
 eval_modality_util: null
 tune_gnn: true
 

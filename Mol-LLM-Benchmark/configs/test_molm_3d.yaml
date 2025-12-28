@@ -1,0 +1,44 @@
+defaults:
+  - data: default
+  - trainer: molm_3d
+
+# General settings
+filename: molm_3d_test
+seed: 42
+mode: test
+
+wandb_entity: jennyshin_gist_2024
+wandb_project: mol-llm-3dmolm
+wandb_log_freq: 100
+wandb_id: null
+# logging_dir: /workspace/Mol_DA/Mol-LLM-Benchmark/checkpoint/TEST/logs/intrinsic_false/molm_3d_20251223
+logging_dir: /workspace/Mol_DA/Mol-LLM-Benchmark/checkpoint/HJ_1223/logs/intrinsic_false/molm_3d_20251228_esol
+
+debug: true
+ckpt_path: null
+pretrained_ckpt_path: null
+
+# LLM settings (3D-MoLM uses Llama-2-7b with LoRA)
+llm_model: "NousResearch/Llama-2-7b-hf" #meta-llama/Llama-2-7b-hf
+
+# 3D-MoLM checkpoint path
+molm_3d_ckpt: /workspace/Mol_DA/Mol-LLM-Benchmark/model/molm_3d/all_checkpoints/generalist/generalist.ckpt
+
+# Benchmark mode
+benchmark: true
+
+# 3D-MoLM specific settings
+mol_representation: string_only  # SMILES input, 3D processed internally
+num_query_token: 8  # 3D-MoLM uses 8 query tokens
+
+shuffle_selfies: false
+shuffle_graph: false
+process_disjoint: true
+
+include_failed_as_zero: true
+
+# Prompt settings
+intrinsic_prompt: false
+
+# Wrapper settings
+wrapper: true

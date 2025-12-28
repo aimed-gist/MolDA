@@ -13,6 +13,9 @@ from rdkit.Chem import AllChem
 
 from .config import UNIMOL_DEFAULTS, QFORMER_DEFAULTS, LORA_DEFAULTS
 
+# 3D-MoLM uses 8 query tokens
+NUM_MOL_TOKENS = 8
+
 
 def get_device():
     if torch.cuda.is_available():
@@ -175,8 +178,31 @@ class ThreeDMoLMGeneration:
 
         return args
 
+    def _convert_mol_tokens(self, text, target_count=NUM_MOL_TOKENS):
+        """
+        Convert prompt with any number of <mol> tokens to exactly target_count tokens.
+        3D-MoLM checkpoint uses 8 query tokens, so we need 8 <mol> tokens.
+        Handles both "<mol><mol>" and "<mol> <mol>" patterns.
+        """
+        import re
+        # Find all <mol> token sequences (with optional spaces between)
+        # Pattern matches: <mol>, <mol> <mol>, <mol><mol>, etc.
+        mol_pattern = r'(\s*<mol>\s*)+'
+
+        def replace_mol_tokens(match):
+            return ' ' + '<mol>' * target_count + ' '
+
+        # Replace any sequence of <mol> tokens with exactly target_count
+        converted = re.sub(mol_pattern, replace_mol_tokens, text)
+        # Clean up extra spaces
+        converted = re.sub(r'\s+', ' ', converted).strip()
+        return converted
+
     def _tokenize(self, text):
         """Tokenize text input"""
+        # Convert to 8 <mol> tokens if needed
+        text = self._convert_mol_tokens(text)
+
         text_tokens = self.tokenizer(
             text,
             add_special_tokens=True,
@@ -186,6 +212,14 @@ class ThreeDMoLMGeneration:
         )
         is_mol_token = text_tokens.input_ids == self.tokenizer.mol_token_id
         text_tokens['is_mol_token'] = is_mol_token
+
+        # Debug: Always print mol token count for first few samples
+        mol_count = is_mol_token.sum().item()
+        print(f"[3D-MoLM DEBUG] mol_count={mol_count}, mol_token_id={self.tokenizer.mol_token_id}")
+        if mol_count != NUM_MOL_TOKENS:
+            print(f"[3D-MoLM] WARNING: Expected {NUM_MOL_TOKENS} <mol> tokens, got {mol_count}")
+            print(f"[3D-MoLM] Converted text (last 200 chars): ...{text[-200:]}")
+
         return text_tokens
 
     def _prepare_graph(self, smiles):
@@ -207,6 +241,7 @@ class ThreeDMoLMGeneration:
         smiles_list=None,
         batch_size=1,
         max_new_tokens=128,
+        min_new_tokens=32,
         num_beams=5,
         do_sample=False,
         repetition_penalty=1.2,
@@ -268,6 +303,7 @@ class ThreeDMoLMGeneration:
                             do_sample=do_sample,
                             num_beams=num_beams,
                             max_new_tokens=max_new_tokens,
+                            min_new_tokens=min_new_tokens,
                             repetition_penalty=repetition_penalty,
                             length_penalty=length_penalty,
                         )

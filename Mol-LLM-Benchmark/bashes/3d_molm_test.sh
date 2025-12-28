@@ -4,7 +4,7 @@ conda activate mol_llm_env
 export TOKENIZERS_PARALLELISM=false
 
 # GPU settings
-gpus="'0,1,2,3'"
+gpus="'0'"
 
 # Data settings
 direct_data_root="/workspace/Origin/Mol_llm_Origin/data/mol-llm_testset"

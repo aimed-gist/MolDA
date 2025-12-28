@@ -1,52 +1,51 @@
 bert_hidden_dim: 768
 bert_name: scibert
 cross_attention_freq: 2
-num_query_token: 0  # Q-Former 사용 안함
+num_query_token: 8  # 3D-MoLM uses 8 query tokens
 bert_num_hidden_layers: 5
 
 projector_type: qformer
 
-llm_model: "OpenDFM/ChemDFM-v1.5-8B"
-tune_llm: freeze  # Zero-shot evaluation - freeze all parameters
+llm_model: "NousResearch/Llama-2-7b-hf" #"meta-llama/Llama-2-7b-hf"
+tune_llm: lora  # 3D-MoLM uses LoRA
 peft_config: null
 peft_dir: ""
 load_in_8bit: false
-lora_r: 64
+lora_r: 8
 lora_alpha: 32
 lora_dropout: 0.1
 selfies_token_path: model/selfies_dict.txt
-add_selfies_tokens: false  # ChemDFM은 자체 chemistry 토큰 사용
-prompt: "<SELFIES>{}</SELFIES>"  # SELFIES 형식 사용
+add_selfies_tokens: false
 
-num_beams: 1
+num_beams: 1  # greedy decoding for faster inference
 
-strategy_name: null
+strategy_name: ddp  # Uses spawn with lazy init (setup() hook) for multi-GPU support
 accelerator: gpu
 devices: "0,1,2,3"
-precision: bf16-mixed
+precision: 32  # Changed from bf16-mixed for 3D-MoLM compatibility
 max_steps: -1
 max_epochs: 10
 every_n_epochs: 1
 task: null
-logging_dir: /workspace/Mol_DA_repo/Mol-LLM-Benchmark/checkpoint/logs
+
 llava_pretraining: 0
 second_stage_start_epoch: 4
 num_workers: 0
 skip_sanity_check: false
 
-# H100 최적화 (8B 모델)
+# Batch settings
 accumulate_grad_batches: 8
 total_batch_size: 512
-batch_size: 8
-inference_batch_size: 16  # 8B 모델
+batch_size: 4
+inference_batch_size: 1  # Single-sample processing (batch disabled due to graph padding issues)
 
 truncation: 1
 padding: max_length
-max_length: 512
-inference_max_length: 512
+max_length: 1024
+inference_max_length: 1024
 
-gen_max_len: 256
-min_len: 8
+gen_max_len: 128
+min_len: 1
 
 apply_sequence_packing: false
 max_packing_size: -1
@@ -64,11 +63,11 @@ gradient_clip_val: 0.5
 val_check_interval: 0.5
 test_on_trainset: false
 
-# multimodal training - Text only
-mol_representation: string_only
+# 3D-MoLM uses 3D molecular representation
+mol_representation: string_only  # SMILES for now, model handles 3D internally
 log_attn_score: false
 eval_modality_util: null
-tune_gnn: false  # GNN 사용 안함
+tune_gnn: false
 
 # molpo
 train_molpo: false

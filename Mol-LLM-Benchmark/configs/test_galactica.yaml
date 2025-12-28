@@ -6,7 +6,7 @@ defaults:
 filename: galactica_test
 seed: 42
 mode: test
-logging_dir:  /workspace/Mol_DA/Mol-LLM-Benchmark/checkpoint/HJ_1222/logs/intrinsic_false/non_classification_galactica_20251222
+logging_dir:  /workspace/Mol_DA/Mol-LLM-Benchmark/checkpoint/HJ_1223/logs/intrinsic_false/galactica_20251223
 wandb_entity: jennyshin_gist_2024
 wandb_project: mol-llm-galactica
 wandb_log_freq: 100

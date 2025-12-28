@@ -118,22 +118,33 @@ def evaluate_regression(df: pd.DataFrame) -> Dict[str, Any]:
     """
     Regression CSV에서 메트릭 계산
 
-    필요 컬럼: idx, task, label, pred, error
+    필요 컬럼: idx, task, label, pred, error, parse_failed
     """
     results = {}
 
     for task in df['task'].unique():
         subset = df[df['task'] == task]
 
-        # pred가 NaN인 경우 = 파싱 실패
-        valid_subset = subset[subset['pred'].notna()]
+        # parse_failed=1인 경우 제외 (온라인 평가와 동일)
+        # parse_failed 컬럼이 없는 경우 (기존 CSV) → pred가 숫자인지로 판단
+        if 'parse_failed' in subset.columns:
+            valid_subset = subset[subset['parse_failed'] != 1]
+        else:
+            # 기존 CSV 호환: pred가 숫자로 변환 가능한 경우만 유효
+            valid_subset = subset[pd.to_numeric(subset['pred'], errors='coerce').notna()]
+
         failure_rate = 1 - len(valid_subset) / len(subset) if len(subset) > 0 else 0
 
         if len(valid_subset) > 0:
-            errors = valid_subset['error'].values
-            mae = np.mean(np.abs(errors))
-            mse = np.mean(errors ** 2)
-            rmse = np.sqrt(mse)
+            # error 컬럼이 NaN이 아닌 것만 사용
+            valid_errors = valid_subset[valid_subset['error'].notna()]
+            if len(valid_errors) > 0:
+                errors = valid_errors['error'].values
+                mae = np.mean(np.abs(errors))
+                mse = np.mean(errors ** 2)
+                rmse = np.sqrt(mse)
+            else:
+                mae = mse = rmse = float('nan')
         else:
             mae = mse = rmse = float('nan')
 

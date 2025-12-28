@@ -11,7 +11,7 @@ wandb_entity: jennyshin_gist_2024
 wandb_project: mol-llm-chemdfm_1.0v_13b
 wandb_log_freq: 100
 wandb_id: null
-logging_dir: /workspace/Mol_DA/Mol-LLM-Benchmark/checkpoint/HJ_1222/logs/intrinsic_false/non_classification_chemdfm_13B_20251222
+logging_dir: /workspace/Mol_DA/Mol-LLM-Benchmark/checkpoint/HJ_1223/logs/intrinsic_false/non_classification_chemdfm_13B_20251223
 debug: true
 ckpt_path: null
 pretrained_ckpt_path: null

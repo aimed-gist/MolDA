@@ -67,6 +67,60 @@ class Blip2Llama(Blip2Base):
         else:
             print(f"missing_keys: {missing_keys}, unexpected_keys: {unexpected_keys}")
 
+    def forward(
+        self,
+        graph_batch,
+        text_batch,
+        labels=None,
+    ):
+        """
+        Forward pass for computing loss and logits.
+
+        Args:
+            graph_batch: Tuple of (atom_vec, dist, edge_type) from UniMol
+            text_batch: Dict with input_ids, attention_mask, is_mol_token
+            labels: Target token ids for computing loss
+
+        Returns:
+            Dict with loss, logits, instance_loss
+        """
+        # Encode graph with UniMol
+        graph_embeds, graph_masks = self.graph_encoder(*graph_batch)
+        graph_embeds = self.ln_graph(graph_embeds)
+
+        # Q-Former processing
+        query_tokens = self.query_tokens.expand(graph_embeds.shape[0], -1, -1)
+        query_output = self.Qformer.bert(
+            query_embeds=query_tokens,
+            encoder_hidden_states=graph_embeds,
+            encoder_attention_mask=graph_masks,
+            return_dict=True,
+        )
+        query_output = self.llm_proj(query_output.last_hidden_state)  # [batch_size, num_query_token, dim]
+
+        # Get input embeddings and replace <mol> tokens with graph embeddings
+        inputs_embeds = self.llm_model.get_input_embeddings()(text_batch['input_ids'])  # [batch_size, max_len, dim]
+        inputs_embeds[text_batch['is_mol_token']] = query_output.flatten(0, 1)  # [batch_size, max_len, dim]
+
+        # Prepare labels (mask padding tokens)
+        if labels is not None:
+            targets = labels.masked_fill(labels == self.pad_token_id, -100)
+        else:
+            targets = None
+
+        # Forward through LLM
+        outputs = self.llm_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=text_batch['attention_mask'],
+            labels=targets,
+            return_dict=True,
+        )
+
+        return {
+            'loss': outputs.loss if outputs.loss is not None else torch.tensor(0.0),
+            'logits': outputs.logits,
+        }
+
     @torch.no_grad()
     def generate(
         self,
@@ -81,27 +135,36 @@ class Blip2Llama(Blip2Base):
         repetition_penalty=1.2,
         length_penalty=1.0,
         num_captions=1,
-    ):  
-        graph_embeds, graph_masks = self.graph_encoder(*graph_batch)
-        graph_embeds = self.ln_graph(graph_embeds)
-        query_tokens = self.query_tokens.expand(graph_embeds.shape[0], -1, -1)
-        query_output = self.Qformer.bert(
-            query_embeds=query_tokens,
-            encoder_hidden_states=graph_embeds,
-            encoder_attention_mask=graph_masks,
-            return_dict=True,
-        )
-        query_output = self.llm_proj(query_output.last_hidden_state) #[batch_size,num_query_token,dim]
-        inputs_embeds = self.llm_model.get_input_embeddings()(text_batch.input_ids) # [batch_size, max_len, dim]
-        inputs_embeds[text_batch.is_mol_token] = query_output.flatten(0, 1) # [batch_size, max_len, dim]
+    ):
+        # Support both dict and object-style access
+        input_ids = text_batch['input_ids'] if isinstance(text_batch, dict) else text_batch.input_ids
+        attention_mask = text_batch['attention_mask'] if isinstance(text_batch, dict) else text_batch.attention_mask
+
+        # Graph-free mode: pure text generation without <mol> tokens
+        if graph_batch is None:
+            inputs_embeds = self.llm_model.get_input_embeddings()(input_ids)
+        else:
+            # Standard mode: encode graph and replace <mol> tokens
+            graph_embeds, graph_masks = self.graph_encoder(*graph_batch)
+            graph_embeds = self.ln_graph(graph_embeds)
+            query_tokens = self.query_tokens.expand(graph_embeds.shape[0], -1, -1)
+            query_output = self.Qformer.bert(
+                query_embeds=query_tokens,
+                encoder_hidden_states=graph_embeds,
+                encoder_attention_mask=graph_masks,
+                return_dict=True,
+            )
+            query_output = self.llm_proj(query_output.last_hidden_state) #[batch_size,num_query_token,dim]
+
+            is_mol_token = text_batch['is_mol_token'] if isinstance(text_batch, dict) else text_batch.is_mol_token
+            inputs_embeds = self.llm_model.get_input_embeddings()(input_ids) # [batch_size, max_len, dim]
+            inputs_embeds[is_mol_token] = query_output.flatten(0, 1) # [batch_size, max_len, dim]
 
         outputs = self.llm_model.generate(
             inputs_embeds=inputs_embeds,
-            attention_mask=text_batch.attention_mask,
+            attention_mask=attention_mask,
             do_sample=do_sample,
             num_beams=num_beams,
-            max_length=max_length,
-            # min_length=min_length,
             max_new_tokens=max_new_tokens,
             min_new_tokens=min_new_tokens,
             pad_token_id=self.pad_token_id,
@@ -109,11 +172,24 @@ class Blip2Llama(Blip2Base):
             repetition_penalty=repetition_penalty,
             length_penalty=length_penalty,
             num_return_sequences=num_captions,
+            output_scores=False,
+            return_dict_in_generate=True,
         )
-        output_text = self.llm_tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+        # Extract sequences and scores
+        sequences = outputs.sequences
+        scores = outputs.scores  # tuple of (batch_size, vocab_size) for each generated token
+
+        # Stack scores to create logits tensor [batch_size, num_generated_tokens, vocab_size]
+        if scores:
+            logits = torch.stack(scores, dim=1)  # [batch_size, num_generated_tokens, vocab_size]
+        else:
+            logits = None
+
+        output_text = self.llm_tokenizer.batch_decode(sequences, skip_special_tokens=True)
 
         output_text = [text.strip() for text in output_text]
-        return output_text
+        return output_text, logits
 
 
 

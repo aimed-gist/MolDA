@@ -87,7 +87,7 @@ UNIFIED_COLUMNS = [
 
 # Task type별 metakey
 CLASSIFICATION_METAKEYS = "prob,correct"
-REGRESSION_METAKEYS = "error"
+REGRESSION_METAKEYS = "error,parse_failed"
 MOLECULE_GENERATION_METAKEYS = "validity,exact_match,MACCS_FTS,RDK_FTS,morgan_FTS,levenshtein"
 CAPTIONING_METAKEYS = ""
 
@@ -246,8 +246,9 @@ class ResultSaver:
         idx: int,
         task: str,
         label: str,
-        pred: float,
+        pred: str,  # 원본 또는 파싱된 문자열 그대로 저장
         error: float,
+        parse_failed: int = 0,  # 1이면 파싱 실패 (offline 평가에서 제외)
     ):
         """Regression 태스크 샘플 추가 및 즉시 저장"""
         row = {
@@ -257,6 +258,7 @@ class ResultSaver:
             "pred": pred,
             "metakey": REGRESSION_METAKEYS,
             "error": error,
+            "parse_failed": parse_failed,
         }
         self._append_row(row)
 
@@ -389,6 +391,7 @@ class ResultSaver:
             idx = list_logs["idx"][i] if i < len(list_logs.get("idx", [])) else i
             task = list_logs["tasks"][i]
             target = list_logs["targets"][i]
+            # converted_predictions 사용 (온라인 평가에서 실제로 사용된 값)
             pred_raw = converted_predictions[i] if i < len(converted_predictions) else list_logs["predictions"][i]
             prob = list_logs["probs"][i] if i < len(list_logs.get("probs", [])) else None
 
@@ -434,33 +437,39 @@ class ResultSaver:
     def _process_regression_sample(
         self, idx: int, task: str, target: str, pred_raw: str
     ):
-        """Regression 샘플 처리"""
+        """Regression 샘플 처리 - converted_predictions (온라인 평가 결과) 그대로 저장"""
         import re
 
-        # Parse target
+        # Parse target for error calculation
+        label_val = None
         match = re.search(r"(?<=<FLOAT>).*?(?=</FLOAT>)", target)
         if match:
             inner = match.group().replace(" ", "").replace("<|", "").replace("|>", "")
             try:
                 label_val = float(inner)
             except:
-                label_val = None
-        else:
-            label_val = None
+                pass
 
-        # Parse prediction
-        pred_val = _parse_flexible_number(pred_raw)
+        # pred_raw는 converted_predictions에서 온 값
+        # - 온라인 평가 성공 시: 파싱된 숫자 문자열 (예: "-0.94")
+        # - 온라인 평가 실패 시: 원본 그대로 (파싱 불가)
+        parse_failed = 0
+        error = float('nan')
 
-        if pred_val is not None and label_val is not None:
-            error = pred_val - label_val
-        else:
-            error = float('nan')
-            if pred_val is None:
-                pred_val = float('nan')
+        try:
+            pred_val = float(pred_raw)
+            # 파싱 성공 → error 계산
+            if label_val is not None:
+                error = pred_val - label_val
+        except:
+            # 파싱 실패 → 원본 그대로 저장, parse_failed flag 설정
+            parse_failed = 1
 
         self.add_regression_sample(
             idx=idx, task=task, label=target,
-            pred=pred_val, error=error,
+            pred=pred_raw,  # 원본 그대로 저장
+            error=error,
+            parse_failed=parse_failed,
         )
 
     def _process_molecule_generation_sample(

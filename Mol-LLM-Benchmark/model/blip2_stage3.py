@@ -5,7 +5,7 @@ from model.blip2_opt import Blip2OPT
 from model.blip2_llama import Blip2Llama
 from model.blip2_mistral import Blip2Mistral
 from model.blip2_t5 import Blip2T5
-from model.Benchmark_model import BenchmarkLLM, LlaSMolBenchmarkLLM
+from model.Benchmark_model import BenchmarkLLM, LlaSMolBenchmarkLLM, MoLM3DBenchmark, GPT4BenchmarkLLM
 import pytorch_lightning as pl
 from torch import optim
 from model.scheduler import LinearWarmupCosineLRScheduler, LinearWarmupStepLRScheduler
@@ -105,35 +105,57 @@ class Blip2Stage3(pl.LightningModule):
 
         # Check for benchmark mode (pure LLM without multimodal components)
         is_benchmark_mode = getattr(args, 'benchmark', False)
+        filename = (getattr(args, 'filename', '') or '').lower()
+        use_3d_molm = getattr(args, 'use_3d_molm', False)
 
-        if is_benchmark_mode:
-            # Benchmark mode: galactica, llasmol, chemdfm, 3d-molm 등
-            filename = (getattr(args, 'filename', '') or '').lower()
-            use_3d_molm = getattr(args, 'use_3d_molm', False)
+        # Check if this is MoLM3D (needs lazy init for multi-GPU due to unicore pickle issue)
+        self._is_molm3d = is_benchmark_mode and (
+            use_3d_molm or 'molm_3d' in filename or '3d_molm' in filename or '3dmolm' in filename
+        )
 
-            if use_3d_molm or '3d_molm' in filename or '3dmolm' in filename:
-                print(f"[Blip2Stage3] Benchmark mode - ThreeDMoLMBenchmarkLLM (filename: {filename})")
-                blip2model = ThreeDMoLMBenchmarkLLM
-            elif 'llasmol' in filename:
-                print(f"[Blip2Stage3] Benchmark mode - LlaSMolBenchmarkLLM (filename: {filename})")
-                blip2model = LlaSMolBenchmarkLLM
-            else:
-                # galactica, chemdfm 등
-                print(f"[Blip2Stage3] Benchmark mode - BenchmarkLLM (filename: {filename})")
-                blip2model = BenchmarkLLM
-        elif "galactica" in args.llm_model:
-            blip2model = Blip2OPT
-        elif "llama" in args.llm_model:
-            blip2model = Blip2Llama
-        elif "mistral" in args.llm_model:
-            blip2model = Blip2Mistral
-        elif "t5" in args.llm_model:
-            blip2model = Blip2T5
+        # Check if this is GPT-4 (API-based, no local GPU needed)
+        llm_model_name = (getattr(args, 'llm_model', '') or '').lower()
+        self._is_gpt4 = is_benchmark_mode and (
+            'gpt-4' in llm_model_name or 'gpt4' in llm_model_name or
+            'gpt-4' in filename or 'gpt4' in filename
+        )
+
+        if self._is_gpt4:
+            # GPT-4: API-based model, no local GPU needed
+            print(f"[Blip2Stage3] GPT-4 API mode - using GPT4BenchmarkLLM (model: {args.llm_model})")
+            self.blip2model = GPT4BenchmarkLLM(args)
+            self.tokenizer = self.blip2model.init_tokenizer()
+        elif self._is_molm3d:
+            # MoLM3D: Lazy initialization for multi-GPU support
+            # unicore LayerNorm uses local functions that can't be pickled with spawn
+            # Model will be created in setup() after DDP initialization
+            print(f"[Blip2Stage3] MoLM3D detected - using lazy initialization for multi-GPU support")
+            self.blip2model = None
+            self.tokenizer = None
         else:
-            raise NotImplementedError()
+            # Other models: immediate initialization (no pickle issue)
+            if is_benchmark_mode:
+                if 'llasmol' in filename:
+                    print(f"[Blip2Stage3] Benchmark mode - LlaSMolBenchmarkLLM (filename: {filename})")
+                    blip2model = LlaSMolBenchmarkLLM
+                else:
+                    # galactica, chemdfm 등
+                    print(f"[Blip2Stage3] Benchmark mode - BenchmarkLLM (filename: {filename})")
+                    blip2model = BenchmarkLLM
+            elif "galactica" in args.llm_model:
+                blip2model = Blip2OPT
+            elif "llama" in args.llm_model:
+                blip2model = Blip2Llama
+            elif "mistral" in args.llm_model:
+                blip2model = Blip2Mistral
+            elif "t5" in args.llm_model:
+                blip2model = Blip2T5
+            else:
+                raise NotImplementedError()
 
-        self.blip2model = blip2model(args)
-        self.tokenizer = self.blip2model.init_tokenizer()
+            self.blip2model = blip2model(args)
+            self.tokenizer = self.blip2model.init_tokenizer()
+
         self.save_hyperparameters(args)
 
         # Task별 샘플 카운트 추적 (task별 최대 10개까지만 저장)
@@ -144,6 +166,18 @@ class Blip2Stage3(pl.LightningModule):
         from datetime import datetime
         self.samples_subdir = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.samples_dir = None  # 첫 저장 시점에 생성
+
+    def setup(self, stage):
+        """Called after DDP initialization on each GPU.
+
+        For MoLM3D, we use lazy initialization here to avoid pickle issues
+        with unicore LayerNorm when using multi-GPU spawn.
+        """
+        if self._is_molm3d and self.blip2model is None:
+            print(f"[Blip2Stage3.setup] Initializing MoLM3DBenchmark on rank {self.global_rank}")
+            self.blip2model = MoLM3DBenchmark(self.args)
+            self.tokenizer = self.blip2model.init_tokenizer()
+            print(f"[Blip2Stage3.setup] MoLM3DBenchmark initialized successfully")
 
     def load_from_stage1_checkpoint(self, path):
         ckpt = torch.load(path, map_location="cpu")
@@ -969,42 +1003,64 @@ class Blip2Stage3(pl.LightningModule):
             additional_graphs = None
             is_mol_token = None
 
-        # Check if LlaSMol model (needs prompt_texts for official generation)
+        # Check if LlaSMol or 3D-MoLM model (needs prompt_texts for generation)
         filename = (getattr(self.args, 'filename', '') or '').lower()
         is_llasmol = 'llasmol' in filename
+        is_3d_molm = 'molm_3d' in filename or '3d_molm' in filename or '3dmolm' in filename
 
-        # Get prompt texts for LlaSMol (already formatted without [INST] wrapper)
+        # Get prompt texts for LlaSMol/3D-MoLM (already formatted)
         prompt_texts = None
-        if is_llasmol and "prompt_text" in batch:
-            prompt_texts = batch["prompt_text"]
+        smiles_list = None
+        # Support both dict and object-style batch access
+        has_prompt_text = "prompt_text" in batch if isinstance(batch, dict) else hasattr(batch, 'prompt_text')
+        if (is_llasmol or is_3d_molm) and has_prompt_text:
+            prompt_texts = batch["prompt_text"] if isinstance(batch, dict) else batch.prompt_text
+        # Get pre-computed 3D graphs for 3D-MoLM
+        molm_3d_graphs = None
+        has_molm_3d_graphs = "molm_3d_graphs" in batch if isinstance(batch, dict) else hasattr(batch, 'molm_3d_graphs')
+        if is_3d_molm and has_molm_3d_graphs:
+            molm_3d_graphs = batch["molm_3d_graphs"] if isinstance(batch, dict) else batch.molm_3d_graphs
+            print(f"[DEBUG] molm_3d_graphs loaded: {len(molm_3d_graphs) if molm_3d_graphs else 0} items")
 
         # Read return_scores from config (for ROC-AUC logits extraction)
         # Set return_scores=true in config when running classification benchmarks
         return_scores = getattr(self.args, 'return_scores', False)
 
-        gen_outputs = self.blip2model.generate(
-            graphs=(graphs, additional_graphs),
-            input_ids=batch.prompt_input_ids,
-            attention_mask=batch.prompt_attention_mask,
-            is_mol_token=is_mol_token,
-            num_beams=self.num_beams,
-            max_length=self.gen_max_len,
-            min_length=self.min_len,
-            output_attentions=self.args.log_attn_score,
-            prompt_texts=prompt_texts,
-            return_scores=return_scores,
-        )
+        # Build generate kwargs - only add smiles_list for 3D-MoLM
+        generate_kwargs = {
+            'graphs': (graphs, additional_graphs),
+            'input_ids': batch.prompt_input_ids,
+            'attention_mask': batch.prompt_attention_mask,
+            'is_mol_token': is_mol_token,
+            'num_beams': self.num_beams,
+            'max_length': self.gen_max_len,
+            'min_length': self.min_len,
+            'output_attentions': self.args.log_attn_score,
+        }
+        # Only add prompt_texts, return_scores, molm_3d_graphs for 3D-MoLM model
+        if is_3d_molm:
+            generate_kwargs['prompt_texts'] = prompt_texts
+            generate_kwargs['return_scores'] = return_scores
+            generate_kwargs['molm_3d_graphs'] = molm_3d_graphs
+
+        gen_outputs = self.blip2model.generate(**generate_kwargs)
         gen_logits = gen_outputs.logits
         gen_labels = batch.gen_labels
 
         forward_outputs = self.blip2model(batch)
         forward_logits = forward_outputs.pop("logits")
         forward_labels = batch.labels
-        forward_loss_dict = get_instance_loss(
-            logits=forward_logits, labels=forward_labels
-        )
-        forward_instance_loss = forward_loss_dict["instance_loss"]
-        forward_loss = forward_loss_dict["loss"]
+
+        # 3D-MoLM returns instance_loss directly (logits may be None due to variable seq lengths)
+        if "instance_loss" in forward_outputs:
+            forward_instance_loss = forward_outputs["instance_loss"]
+            forward_loss = forward_outputs.get("loss", torch.tensor(0.0, device=forward_instance_loss.device))
+        else:
+            forward_loss_dict = get_instance_loss(
+                logits=forward_logits, labels=forward_labels
+            )
+            forward_instance_loss = forward_loss_dict["instance_loss"]
+            forward_loss = forward_loss_dict["loss"]
 
         if self.args.eval_molpo:
             len_tuple = gen_labels.shape[0] // self.args.molpo_batch_division
@@ -1144,6 +1200,11 @@ class Blip2Stage3(pl.LightningModule):
                         parsed_pred = "True"
                     elif raw_lower.startswith('no'):
                         parsed_pred = "False"
+                    # 3D-MoLM 자연어 응답 패턴 (inhibit 관련)
+                    elif 'cannot inhibit' in raw_lower or 'not inhibit' in raw_lower:
+                        parsed_pred = "False"
+                    elif 'can inhibit' in raw_lower or 'inhibit' in raw_lower:
+                        parsed_pred = "True"
                     else:
                         parsed = parse_flexible_classification(raw_pred)
                         parsed_pred = ("True" if parsed[1] > parsed[0] else "False") if parsed else "PARSE FAILED"
@@ -1490,7 +1551,29 @@ class Blip2Stage3(pl.LightningModule):
                 print(f"[RAW PREDICTION] {self.list_logs['predictions'][i]}")
                 print(f"[PARSED OUTPUT] {converted_predictions[i]}")
                 print(f"[TARGET] {self.list_logs['targets'][i]}")
+                # bace task일 때 prob 확률도 출력
+                if 'bace' in self.list_logs['tasks'][i].lower():
+                    print(f"[PROB] {self.list_logs['probs'][i]}")
             print(f"{'='*80}\n")
+
+            # [DEBUG] bace task 샘플 별도 출력 (prob 확인용) - 로그 파일에 저장
+            bace_indices = [i for i, task in enumerate(self.list_logs['tasks']) if 'bace' in task.lower()]
+            if bace_indices:
+                debug_log_dir = os.path.join(self.args.logging_dir, self.args.filename)
+                os.makedirs(debug_log_dir, exist_ok=True)
+                bace_prob_log_path = os.path.join(debug_log_dir, f"bace_prob_rank{self.global_rank}.log")
+                with open(bace_prob_log_path, 'w') as f:
+                    f.write(f"{'='*80}\n")
+                    f.write(f"[DEBUG] BACE task 샘플 - {len(bace_indices)}개\n")
+                    f.write(f"{'='*80}\n\n")
+                    for i in bace_indices:
+                        f.write(f"--- BACE Sample (idx={i}) ---\n")
+                        f.write(f"[RAW PREDICTION] {self.list_logs['predictions'][i][:200]}\n")
+                        f.write(f"[PARSED OUTPUT] {converted_predictions[i]}\n")
+                        f.write(f"[TARGET] {self.list_logs['targets'][i]}\n")
+                        f.write(f"[PROB] {self.list_logs['probs'][i]}\n\n")
+                    f.write(f"{'='*80}\n")
+                print(f"[DEBUG] BACE prob log saved to: {bace_prob_log_path}")
 
         # 변환된 predictions 사용 (평가 직전 데이터)
         self.save_predictions(
@@ -1690,6 +1773,26 @@ class Blip2Stage3(pl.LightningModule):
         total_tasks = [
             self.cls_task_subtask_name_pair_dict_inv[idx] for idx in tasks_subtask_idx
         ]
+
+        # DEBUG: 온라인 평가용 데이터 로그 (파일로 저장)
+        debug_log_dir = os.path.join(self.args.logging_dir, self.args.filename)
+        os.makedirs(debug_log_dir, exist_ok=True)
+        online_eval_log_path = os.path.join(debug_log_dir, f"online_eval_rank{self.global_rank}.log")
+        with open(online_eval_log_path, 'w') as f:
+            f.write(f"[DEBUG ONLINE EVAL Rank {self.global_rank}] Classification data:\n")
+            f.write(f"  total_samples: {len(total_labels)}\n")
+            f.write(f"  parsing_failures: {parsing_failure_mask.sum().item()}\n")
+            for task_name in set(total_tasks):
+                task_mask = [t == task_name for t in total_tasks]
+                task_probs = total_probs[task_mask, 1].numpy()
+                task_labels = total_labels[task_mask].numpy()
+                f.write(f"  [{task_name}] samples={len(task_labels)}, labels_1={task_labels.sum()}, prob_min={task_probs.min():.4f}, prob_max={task_probs.max():.4f}\n")
+            # probs와 labels 전체 저장
+            f.write(f"\n--- Detail per sample ---\n")
+            for i, task_name in enumerate(total_tasks):
+                f.write(f"{i},{task_name},{total_labels[i].item()},{total_probs[i, 1].item():.6f}\n")
+        print(f"[Rank {self.global_rank}] Online eval log saved to: {online_eval_log_path}")
+
         classification_evaluation_result = total_device_evaluate(
             total_labels=total_labels,
             total_probs=total_probs,

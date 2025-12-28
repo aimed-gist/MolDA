@@ -15,7 +15,7 @@ wandb_id: null
 debug: true
 ckpt_path: null
 pretrained_ckpt_path: null
-logging_dir: /workspace/Mol_DA/Mol-LLM-Benchmark/checkpoint/HJ_1222/logs/intrinsic_false/llasmol_20251222
+logging_dir: /workspace/Mol_DA/Mol-LLM-Benchmark/checkpoint/HJ_1223/logs/intrinsic_false/llasmol_20251223
 # LLM 설정 (LLaSMol-Mistral-7B)
 # Base model + LoRA adapter
 llm_model: mistralai/Mistral-7B-v0.1

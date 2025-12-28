@@ -1,0 +1,41 @@
+defaults:
+  - data: default
+  - trainer: gpt4o_mini
+
+# General settings
+filename: gpt4o_mini_benchmark
+seed: 42
+mode: test
+logging_dir: /workspace/Mol_DA/Mol-LLM-Benchmark/checkpoint/gpt4o_mini/logs
+wandb_entity: null
+wandb_project: mol-llm-gpt4o-mini
+wandb_log_freq: 100
+wandb_id: null
+
+debug: false
+ckpt_path: null
+pretrained_ckpt_path: null
+
+# LLM model - GPT-4o-mini (very cost-effective)
+llm_model: gpt-4o-mini
+
+# Benchmark mode - API-based LLM
+benchmark: true
+
+# Molecule representation - Text only
+mol_representation: string_only
+num_query_token: 0
+
+shuffle_selfies: false
+shuffle_graph: false
+process_disjoint: true
+
+include_failed_as_zero: true
+
+# Prompt settings
+# intrinsic_prompt: false -> keep original prompts
+intrinsic_prompt: false
+
+# Wrapper settings
+# wrapper: false -> no wrapper for GPT-4o-mini (cleaner prompts)
+wrapper: false

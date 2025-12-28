@@ -109,10 +109,25 @@ def main(cfg):
         cfg.current_epoch = 0
 
     # datamodule
+    # For MoLM3D with lazy init, tokenizer is not available yet
+    # Create tokenizer separately or use None (DataModule will handle it)
+    if model.blip2model is not None:
+        tokenizer = model.blip2model.llm_tokenizer
+    else:
+        # MoLM3D lazy init case - create tokenizer directly
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(cfg.llm_model, use_fast=False, padding_side='right')
+        tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+        tokenizer.add_special_tokens({'bos_token': '</s>'})
+        tokenizer.add_special_tokens({'eos_token': '</s>'})
+        tokenizer.add_special_tokens({'unk_token': '</s>'})
+        tokenizer.add_special_tokens({'additional_special_tokens': ['<mol>']})
+        tokenizer.mol_token_id = tokenizer("<mol>", add_special_tokens=False).input_ids[0]
+
     dm = Stage3DM(
         mode=cfg.mode,
         num_workers=cfg.num_workers,
-        tokenizer=model.blip2model.llm_tokenizer,
+        tokenizer=tokenizer,
         args=cfg,
     )
 
@@ -133,9 +148,12 @@ def main(cfg):
         elif cfg.strategy_name == "deepspeed":
             strategy = strategies.DeepSpeedStrategy(stage=3)
         else:
+            # Use config-based ddp_start_method (default: spawn)
+            # molm_3d uses 'fork' due to unicore LayerNorm pickle issue
+            ddp_start_method = getattr(cfg, 'ddp_start_method', 'spawn')
             strategy = MyDDPStrategy(
                 find_unused_parameters=cfg.find_unused_parameters,
-                start_method="spawn",
+                start_method=ddp_start_method,
                 timeout=timedelta(minutes=90),
             )
     else:

@@ -53,3 +53,7 @@ ENV/
 .cache/
 *.arrow
 data/mol-llm_testset/
+
+# Large model checkpoints
+model/molm_3d/all_checkpoints/
+*.msgpack

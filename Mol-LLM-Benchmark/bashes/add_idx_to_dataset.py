@@ -6,8 +6,13 @@
 
 from datasets import load_from_disk
 
-INPUT_PATH = "/workspace/DATA/GSAI-ML-LLaDA-8B-Instruct_string+graph_q32_test_3.3M_0415_verified_filtered_512"
-OUTPUT_PATH = "/workspace/DATA/GSAI-ML-LLaDA-8B-Instruct_string+graph_q32_test_3.3M_0415_verified_filtered_512_indexed"
+# INPUT_PATH = "/workspace/DATA/GSAI-ML-LLaDA-8B-Instruct_string+graph_q32_test_3.3M_0415_verified_filtered_512"
+# OUTPUT_PATH = "/workspace/DATA/GSAI-ML-LLaDA-8B-Instruct_string+graph_q32_test_3.3M_0415_verified_filtered_512_indexed"
+
+# direct_data_root="/workspace/Origin/Mol_llm_Origin/data/mol-llm_testset"
+direct_data_root="/workspace/DATA/GSAI-ML-LLaDA-8B-Instruct_string+graph_q32_test_512_Truncation"
+INPUT_PATH = direct_data_root
+OUTPUT_PATH = direct_data_root + "_indexed"
 
 def main():
     print(f"Loading dataset from: {INPUT_PATH}")
