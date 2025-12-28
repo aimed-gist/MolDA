@@ -44,6 +44,8 @@ from .formatter import (
     format_prompt_for_gpt,
     format_prompt_for_llasmol,
     format_prompt_for_chemdfm,
+    format_prompt_for_3d_molm,
+    format_prompt_for_mol_llm,
     selfies_to_smiles,
     extract_description_from_prompt,
 )
@@ -72,6 +74,7 @@ __all__ = [
     "format_prompt_for_gpt",
     "format_prompt_for_llasmol",
     "format_prompt_for_chemdfm",
+    "format_prompt_for_3d_molm",
     "selfies_to_smiles",
     "extract_description_from_prompt",
 ]

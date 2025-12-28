@@ -168,7 +168,7 @@ class PromptFormatter:
         formatted = formatter.format(prompt, selfies_str, task_name)
     """
 
-    SUPPORTED_MODELS = ["galactica", "llama", "mistral", "gpt", "llasmol", "chemdfm"]
+    SUPPORTED_MODELS = ["galactica", "llama", "mistral", "gpt", "llasmol", "chemdfm", "molm_3d", "hjchoi"]
 
     def __init__(self, model_name: str):
         """
@@ -179,32 +179,34 @@ class PromptFormatter:
         if self.model_name not in self.SUPPORTED_MODELS:
             raise ValueError(f"Unsupported model: {model_name}. Supported: {self.SUPPORTED_MODELS}")
 
-    def format(self, prompt: str, selfies_str: str, task_name: str) -> str:
-        """
-        프롬프트를 모델에 맞게 포맷팅
+    # def format(self, prompt: str, selfies_str: str, task_name: str) -> str:
+    #     """
+    #     프롬프트를 모델에 맞게 포맷팅
 
-        Args:
-            prompt: 원본 프롬프트
-            selfies_str: SELFIES 분자 표현
-            task_name: Task 이름
+    #     Args:
+    #         prompt: 원본 프롬프트
+    #         selfies_str: SELFIES 분자 표현
+    #         task_name: Task 이름
 
-        Returns:
-            포맷팅된 프롬프트
-        """
-        if self.model_name == "galactica":
-            return self._format_galactica(prompt, selfies_str, task_name)
-        elif self.model_name == "llama":
-            return self._format_llama(prompt, selfies_str, task_name)
-        elif self.model_name == "mistral":
-            return self._format_mistral(prompt, selfies_str, task_name)
-        elif self.model_name == "gpt":
-            return self._format_gpt(prompt, selfies_str, task_name)
-        elif self.model_name == "llasmol":
-            return self._format_llasmol(prompt, selfies_str, task_name)
-        elif self.model_name == "chemdfm":
-            return self._format_chemdfm(prompt, selfies_str, task_name)
-        else:
-            return prompt
+    #     Returns:
+    #         포맷팅된 프롬프트
+    #     """
+    #     if self.model_name == "galactica":
+    #         return self._format_galactica(prompt, selfies_str, task_name)
+    #     elif self.model_name == "llama":
+    #         return self._format_llama(prompt, selfies_str, task_name)
+    #     elif self.model_name == "mistral":
+    #         return self._format_mistral(prompt, selfies_str, task_name)
+    #     elif self.model_name == "gpt":
+    #         return self._format_gpt(prompt, selfies_str, task_name)
+    #     elif self.model_name == "llasmol":
+    #         return self._format_llasmol(prompt, selfies_str, task_name)
+    #     elif self.model_name == "chemdfm":
+    #         return self._format_chemdfm(prompt, selfies_str, task_name)
+    #     elif self.model_name == "molm_3d":
+    #         return self._format_m
+    #     else:
+    #         return prompt
 
     def _format_galactica(self, prompt: str, selfies_str: str, task_name: str) -> str:
         """
@@ -262,9 +264,22 @@ class PromptFormatter:
         """Llama 모델용 (원본 유지)"""
         return prompt
 
-    def _format_mistral(self, prompt: str, selfies_str: str, task_name: str) -> str:
-        """Mistral 모델용 (원본 유지)"""
-        return prompt
+    def _format_HJ(self, prompt: str, selfies_str: str, task_name: str) -> str:
+        formatted = prompt
+
+        # 1. <|startoftext|><|start_header_id|>system<|end_header_id|> 제거
+        formatted = formatted.replace('<|startoftext|><|start_header_id|>system<|end_header_id|>\n\n', '')
+        formatted = formatted.replace('<|startoftext|><|start_header_id|>system<|end_header_id|>', '')
+
+        # 2. <|eot_id|><|start_header_id|>user<|end_header_id|> 제거
+        formatted = formatted.replace('<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n', '\n\n')
+        formatted = formatted.replace('<|eot_id|><|start_header_id|>user<|end_header_id|>', '\n\n')
+
+        # 3. <|eot_id|><|start_header_id|>assistant<|end_header_id|> 제거
+        formatted = formatted.replace('<|eot_id|><|start_header_id|>assistant<|end_header_id|>', '')
+        formatted = clean_whitespace(formatted)
+        formatted = "<s>[INST]"+formatted+" [/INST]"
+        return formatted
 
     def _format_gpt(self, prompt: str, selfies_str: str, task_name: str) -> str:
         """GPT 모델용 - instruction wrapper 제거"""
@@ -423,6 +438,140 @@ class PromptFormatter:
         #     return formatted
         return f"[Round 0]\nHuman: {formatted}\nAssistant:"
 
+    def _format_molm_3d_passthrough(self, prompt: str, selfies_str: str, task_name: str) -> str:
+        """
+        3dMolM 모델용 - Passthrough 모드
+        - 원본 프롬프트를 최대한 유지하면서 불필요한 태그만 제거
+        - SELFIES → SMILES 변환
+
+        변환 규칙:
+        - <|startoftext|> 제거
+        - <|start_header_id|>system<|end_header_id|> → 제거 (시스템 프롬프트 내용은 유지)
+        - <|eot_id|><|start_header_id|>user<|end_header_id|> → 줄바꿈으로 대체
+        - <SELFIES>...</SELFIES> → SMILES로 변환 (태그 제거)
+        - <GRAPH>...</GRAPH> → 내용 포함 전체 제거
+        - <|eot_id|><|start_header_id|>assistant<|end_header_id|> → 제거
+        - "SELFIES" 텍스트 → "SMILES"로 변환
+
+        Args:
+            wrapper: True면 [Round 0]\nHuman: ...\nAssistant: 형식으로 감싸기
+        """
+        formatted = prompt
+
+        # 1. <|startoftext|> 제거
+        formatted = formatted.replace('<|startoftext|>', '')
+
+        # 2. <|start_header_id|>system<|end_header_id|> 제거 (시스템 프롬프트 내용은 유지)
+        formatted = formatted.replace('<|start_header_id|>system<|end_header_id|>\n\n', '')
+        formatted = formatted.replace('<|start_header_id|>system<|end_header_id|>', '')
+
+        # 3. <|eot_id|><|start_header_id|>user<|end_header_id|> → 줄바꿈으로 대체
+        formatted = formatted.replace('<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n', '\n\n')
+        formatted = formatted.replace('<|eot_id|><|start_header_id|>user<|end_header_id|>', '\n\n')
+
+        # 4. <SELFIES>...</SELFIES> → SMILES로 변환 (태그 없이)
+        formatted = convert_all_selfies_tags(formatted)
+
+        # 5. <GRAPH>...</GRAPH> 내용 포함 전체 제거
+        formatted = remove_graph_tags(formatted)
+        # pattern = r'<SELFIES>\s*.*?\s*</SELFIES>'
+        # formatted=re.sub(pattern, ' Input molecule ', formatted)
+        # 6. <|eot_id|><|start_header_id|>assistant<|end_header_id|> 제거
+        formatted = formatted.replace('<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n', '')
+        formatted = formatted.replace('<|eot_id|><|start_header_id|>assistant<|end_header_id|>', '')
+
+        # 7. 남은 <|eot_id|> 제거
+        formatted = formatted.replace('<|eot_id|>', '')
+
+        # 8. "SELFIES" 텍스트 → "SMILES"로 변환
+        formatted = formatted.replace('SELFIES', 'SMILES')
+
+        # 9. <DESCRIPTION>...</DESCRIPTION> 태그 제거 (내용은 유지)
+        formatted = re.sub(r'<DESCRIPTION>(.*?)</DESCRIPTION>', r'\1', formatted, flags=re.DOTALL)
+
+        # 10. 공백 정리
+        formatted = clean_whitespace(formatted)
+
+        # SELFIES → SMILES 변환 (reaction은 |>>| 구분자 때문에 특별 처리)
+        task_type = get_task_type(task_name)
+        if task_type == "reaction" and "|>>|" in selfies_str:
+            # Reaction SELFIES: reactants|>>|products 형태
+            # 각 부분을 개별적으로 SMILES로 변환
+            parts = selfies_str.split("|>>|")
+            smiles_parts = []
+            for part in parts:
+                molecules = part.split(".")
+                mol_smiles = []
+                for mol in molecules:
+                    mol = mol.strip()
+                    if mol:
+                        try:
+                            mol_smiles.append(sf.decoder(mol))
+                        except:
+                            mol_smiles.append(mol)  # 실패 시 원본 유지
+                smiles_parts.append(".".join(mol_smiles))
+            smiles = ">>".join(smiles_parts)
+        else:
+            try:
+                smiles = sf.decoder(selfies_str)
+            except:
+                smiles = selfies_str  # 디코딩 실패 시 원본 유지
+
+        # 3dmolm전용 System Prompt 적용
+        prompt =  "Below is an instruction that describes a task, paired with an input molecule.\n" \
+         "Instruction: {}. {}\n" \
+         "Input molecule: {} <mol><mol><mol><mol><mol><mol><mol><mol>\n" \
+         "{}"
+        #formatted, instruction_futter,smiles,condition
+        # 특정 task에 단서 조항 달기 (task_type은 위에서 이미 계산됨)
+        task_base = task_name.split("/")[0]
+        if task_name == "bace":
+            instruction_futter = " predict whether it can inhibit (True) the Beta-site Amyloid Precursor Protein Cleaving Enzyme 1 (BACE1) or cannot inhibit (False)."
+            condition = "Answer:"
+        elif task_name == "smol-property_prediction-bbbp":
+            instruction_futter = " predict whether it can penetrate (True) the blood-brain barrier or not (False)."
+            condition = "Answer:"
+        elif task_name == "smol-property_prediction-clintox":
+            instruction_futter= " predict whether it is toxic (True) to humans or not (False). "
+            condition = "Answer:"
+        elif task_name == "smol-property_prediction-hiv":
+            instruction_futter= " predict whether it is active (True) against HIV or not (False)."
+            condition = "Answer:"
+        elif task_name == "smol-property_prediction-sider":
+            instruction_futter= " predict whether it has side effects (True) or not (False)."
+            condition = "Answer:"
+        elif task_type == "reaction":
+            instruction_futter= ""
+            condition = "Answer with SMILES only:"
+        elif task_type =="text2mol":
+            instruction_futter= ""
+            condition = "Answer with SMILES only:"
+        elif task_name == "smol-property_prediction-esol":
+            instruction_futter= ""
+            formatted=""            
+            prompt = "{}{}Question: What is the aqueous solubility (LogS is log10(mol/L) at 25°C) of the following molecule in decimal form?"\
+                "Input molecule: {} <mol><mol><mol><mol><mol><mol><mol><mol>\n" \
+                "{}"
+            condition = "Answer:"
+        else:
+            instruction_futter=""
+            condition ="Answer:"
+        input_text = prompt.format(formatted, instruction_futter,smiles,condition)
+        # elif task_type =="regression":
+        #     if task_name == "qm9_homo":
+        #         pass
+        #     elif task_name == "qm9_lumo":
+        #         instruction_futter += "\n your task is to predict quantum mechanical properties of molecules. Please strictly follow the format, no other information can be provided. Given the SMILES string of a molecule, predict the LUMO energy in Hartree units.  Answer with only the numerical value. LUMO (Hartree)"
+        #     elif task_name =="qm9_homo_lumo_gap":
+        #         formatted += "\n your task is to predict quantum mechanical properties of molecules. Please strictly follow the format, no other information can be provided. Given the SMILES string of a molecule, predict the HOMO-LUMO gap energy in Hartree units.  Answer with only the numerical value. HOMO-LUMO gap (Hartree)"
+        #     else:
+        #         formatted += "\n Answer with a number only"
+        # # wrapper 옵션에 따라 ChemDFM wrapper 적용
+        # if wrapper:
+        #     return f"[Round 0]\nHuman: {formatted}\nAssistant:"
+        # else:
+        #     return formatted
+        return input_text
     def _format_llasmol_passthrough(self, prompt: str, selfies_str: str, task_name: str, wrapper: bool = False) -> str:
         """
         LLaSMol 모델용 - Passthrough 모드
@@ -510,7 +659,7 @@ class PromptFormatter:
 
         return formatted
 
-        return None
+
 
 
 # 기존 함수들과의 호환성을 위한 wrapper 함수들
@@ -559,6 +708,16 @@ def format_prompt_for_chemdfm(prompt: str, selfies_str: str, task_name: str, int
         return formatter._format_chemdfm(prompt, selfies_str, task_name)
     else:
         return formatter._format_chemdfm_passthrough(prompt, selfies_str, task_name)
+
+
+def format_prompt_for_3d_molm(prompt: str, selfies_str: str, task_name: str) -> str:
+    """Format prompt for 3D-MoLM model."""
+    formatter = PromptFormatter("molm_3d")
+    return formatter._format_molm_3d_passthrough(prompt, selfies_str, task_name)
+
+def format_prompt_for_mol_llm(prompt: str, selfies_str: str, task_name: str) -> str:
+    formatter = PromptFormatter("hjchoi")
+    return formatter._format_HJ(prompt, selfies_str, task_name)
 
 
 # ============ Test Cases ============
