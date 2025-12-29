@@ -410,29 +410,10 @@ def parse_description(text: str) -> str:
 
 
 def parse_caption_pred(text: str) -> str:
-    """Captioning prediction 후처리 (Galactica 등)"""
-    import re
+    """Captioning prediction 후처리 - CSV의 pred는 이미 파싱된 텍스트이므로 그대로 반환"""
     if not text:
         return ""
-
-    text = str(text)
-
-    # EOS 토큰 제거
-    for eos_token in ['</s>', '<|end_of_text|>', '<|endoftext|>', '<|eot_id|>']:
-        if eos_token in text:
-            text = text.split(eos_token)[0]
-
-    # Galactica: "Figure X:" 패턴 이후 제거
-    text = re.sub(r'\n*\s*Figure\s+\d+\s*:.*', '', text, flags=re.DOTALL)
-
-    # 더블 줄바꿈 이후 제거
-    if '\n\n' in text:
-        text = text.split('\n\n')[0]
-
-    # 특수 토큰 제거
-    text = re.sub(r'<[^>]+>', '', text)
-
-    return text.strip()
+    return str(text).strip()
 
 
 def evaluate_captioning(df: pd.DataFrame, tokenizer=None) -> Dict[str, Any]:
@@ -463,9 +444,9 @@ def evaluate_captioning(df: pd.DataFrame, tokenizer=None) -> Dict[str, Any]:
             if not ref or not hyp:
                 continue
 
-            # 간단한 토크나이징 (공백 기준)
-            ref_tokens = ref.split()
-            hyp_tokens = hyp.split()
+            # character-level 토크나이징 (온라인 평가와 동일)
+            ref_tokens = list(ref)
+            hyp_tokens = list(hyp)
 
             references.append([ref_tokens])
             hypotheses.append(hyp_tokens)
