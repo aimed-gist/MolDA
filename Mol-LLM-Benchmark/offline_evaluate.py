@@ -224,8 +224,9 @@ def calculate_fcd(gt_smiles_list: List[str], pred_smiles_list: List[str]) -> flo
         return float('nan')
 
     try:
-        model = load_ref_model()
-        fcd_score = get_fcd(gt_smiles_list, pred_smiles_list, model)
+        # CPU에서만 실행 (오프라인 평가는 GPU 사용 안함)
+        model = load_ref_model(device='cpu')
+        fcd_score = get_fcd(gt_smiles_list, pred_smiles_list, model, device='cpu')
         return fcd_score
     except Exception as e:
         print(f"[WARNING] FCD calculation failed: {e}")
